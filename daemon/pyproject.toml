@@ -1,0 +1,16 @@
+[project]
+name = "cardbuddy"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["bleak>=0.22", "cryptography>=42", "pyserial>=3.5"]
+
+[project.scripts]
+buddyd = "cardbuddy.buddyd:main"
+buddy = "cardbuddy.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

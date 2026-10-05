@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.key
+.cardbuddy/
+mod/.claude-plugin/types/
+daemon/tools/recorded_line.txt

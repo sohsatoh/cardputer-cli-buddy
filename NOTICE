@@ -1,0 +1,10 @@
+Cardputer CLI Buddy
+Copyright 2026 Soh Satoh
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The `device/` directory is a modified copy of the buddy from
+moremas/build-with-claude (https://github.com/moremas/build-with-claude),
+licensed under the Apache License, Version 2.0. Its copyright notice and a
+description of the modifications are in device/NOTICE; third-party notices
+are in device/LICENSE-THIRD-PARTY.md.

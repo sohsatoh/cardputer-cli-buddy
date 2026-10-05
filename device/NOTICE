@@ -1,0 +1,31 @@
+m5stack
+Copyright 2026 MAS Event + Design, LLC
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles one third-party Python package in
+`onboard/scripts/vendor/`: pyserial 3.5, BSD-3-Clause licensed. See
+LICENSE-THIRD-PARTY.md for details.
+
+esptool (required at runtime by the flash stage) is GPLv2+ and is
+intentionally NOT bundled with this repository. It is declared as a
+pip dependency in requirements.txt and the skill's preflight
+auto-installs it on first run if missing. This keeps the repository
+itself cleanly Apache-2.0-compatible.
+
+---
+
+This directory (`device/`) is a modified copy of the `buddy/device/` and
+`buddy/scripts/` directories of moremas/build-with-claude
+(https://github.com/moremas/build-with-claude, commit b3b5888), licensed
+under the Apache License, Version 2.0.
+
+Modifications by the Cardputer CLI Buddy project: the Hardware Buddy
+protocol (`buddy_protocol.py`) was replaced with the encrypted protocol
+described in `PROTOCOL.md`, `crypto.py`, `kana.py`, `scripts/deploy.py`
+and `tests/` were added, and
+`buddy_ble.py`, `buddy_ui_cp.py`, `apps/claude_buddy.py` and
+`scripts/push.py` were changed accordingly.
+The pyserial copy under `onboard/scripts/vendor/` mentioned above (and in
+LICENSE-THIRD-PARTY.md) is not included in this directory; `scripts/` uses
+an installed pyserial instead.

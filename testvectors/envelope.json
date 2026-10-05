@@ -1,0 +1,78 @@
+{
+  "_doc": "PROTOCOL.md のテストベクタ。bytes は hex。frames は順に seal した結果で、受信側はその順に open して pt と一致すること。audio_frames は frames の後に同じセッションで seal した Audio フレーム（平文は pt_hex）。reject は、frames をすべて受理したあとの受信状態（rx_ctr = 各方向の最後の ctr）で open し、すべて拒否されること。",
+  "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nh": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "nd": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "enc_key": "31ffe51d1ec55a8d99dc17049a3839f1",
+  "mac_key": "95259e7df9e60ffaa6dfbadfaa8f9f9fdf7a138e908db717ce41704f9e3ff59b",
+  "hello_host": "AUhooKGio6SlpqeoqaqrrK2urw==",
+  "hello_device": "AUhksLGys7S1tre4ubq7vL2+vw==",
+  "frames": [
+    {
+      "dir": 1,
+      "ctr": 1,
+      "pt": "{\"t\":\"sessions\",\"s\":[{\"n\":1,\"id\":\"0f3c9a1e\",\"name\":\"cardputer-cli-buddy\",\"title\":\"実装して\",\"state\":\"idle\"}]}",
+      "line": "AUQBAAAAAbUMoSQVWB1BorpsaL8wbTlXKDgGgf/ya37oxZj8q2KQJESBVmm7fAxtKtuXkx72WDnG9jlJUn/vMTiL+iDBHXxlpSHI/YguC9myMRkaIg6ayPlt6m7+hYx9uAzBIOvK1uPPqTRuGg2iGr6s6fVj8oQm5iYXHDaXFJ0TQe4JsGMivw=="
+    },
+    {
+      "dir": 1,
+      "ctr": 2,
+      "pt": "{\"t\":\"perm\",\"n\":1,\"req\":\"r1\",\"tool\":\"Bash\",\"hint\":\"rm -rf ./build\"}",
+      "line": "AUQBAAAAAnS932ce+r76G/Oj7PfKAXWQ8aJVynl7wAmTkKJhTNIYF64Ml5gmwJ03la9Ai7n81DUQvgfb66ka8MUH8K3ljlWCakGxXt4B43Nk7VphwJeRX/Ze"
+    },
+    {
+      "dir": 2,
+      "ctr": 1,
+      "pt": "{\"t\":\"perm_reply\",\"req\":\"r1\",\"decision\":\"allow\"}",
+      "line": "AUQCAAAAAeYw9hgD2UBgeWFtca1xyVaY48GQzB3ZbJBdG3DMfheIkkYGnMaxFBe5Q35NyzceXSeqgaQXkXYVb6+XTFj46is="
+    },
+    {
+      "dir": 2,
+      "ctr": 2,
+      "pt": "{\"t\":\"prompt\",\"n\":1,\"id\":\"0f3c9a1e\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+      "line": "AUQCAAAAApQ4PRs5X/gqkkfYFWc4PmRV7vBPL0rxrxMS94XXGxLPIPcl2hcbDtW4O5PRFG8OAoqd28lEYv0Mw8QjsUcgdMITK8pyvw9H/nfaykJBqxmAF4+tkUMew+Ozb/A/RFBPyt0APdJkcU8xpwr69iSV85zwgsDakrClSji0R4qMtHK0DdjtIKs49crU1sQnlB1+D0OCtTUvfMFOAY+orj8rsshOHg=="
+    }
+  ],
+  "audio_frames": [
+    {
+      "dir": 2,
+      "ctr": 3,
+      "pt_hex": "0001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "line": "AUECAAAAA9sR4aVvcm3GSMC8zckK4+TV71nZxN/IerScEpQb0H92AbQ/Vdj0JAaritS1jhMnxGnZg5SE86wVY6wE/pyMhQT5l8XgBGFVbFouCUVmL6REJuILErUHmAnkE8hB8ZfQbyEq5CLNXTmKkiW9pyTF/autA8AnKuvWfc/ajlMgkFHn67mk5GiabyeJAfNoJlwPK3KyOWbFvYOGIQ8Z8t1HoKN48IDSGyxGZ9Rzgwai1vjvTLxntYUJKx2+pfz3ReDGEAbC5Fi+av2YxsabBnwawSzA+JJI9ISJXGCRwRFCg4OwX9zkR5PqLuFgLogiFcV0YIhGheXtpZFPFcUHwu9q+X3wcsUlHvp9bHCmoc+JrKLBNnkgwhTOhnII6SAHbQ78Zp/HrJBk+UvF1It2brEm2nB153sdyZtCLVmPM0GfPKogLJl2juVynUfGeHNPVN9BVtTszKrEuDoYhwynwKzVd5EgV456fQA5Ze890R0YtoYt2dHeD1QnBZcY3iegaKy3WlWgjr1y2Vme3KLRfT/xvZSRE5VzHO+dXN3DMSxVpBKPGh2EfscJR5PidEm5pzbSr55+jADYFl1FMQbSJFM+LaDc/6EDhkovX+VBn3U7xBYsMqkuXasPDrdwfRzG2sLzojL5WlYqSn1/soa8eECACAfHvQTJQDdbAO//59GIgbg/pE7mV8nqiPlru1XawdaFXXql"
+    }
+  ],
+  "reject_h2d": [
+    {
+      "why": "replay",
+      "line": "AUQBAAAAAbUMoSQVWB1BorpsaL8wbTlXKDgGgf/ya37oxZj8q2KQJESBVmm7fAxtKtuXkx72WDnG9jlJUn/vMTiL+iDBHXxlpSHI/YguC9myMRkaIg6ayPlt6m7+hYx9uAzBIOvK1uPPqTRuGg2iGr6s6fVj8oQm5iYXHDaXFJ0TQe4JsGMivw=="
+    },
+    {
+      "why": "tampered ciphertext",
+      "line": "AUQBAAAAAnS832ce+r76G/Oj7PfKAXWQ8aJVynl7wAmTkKJhTNIYF64Ml5gmwJ03la9Ai7n81DUQvgfb66ka8MUH8K3ljlWCakGxXt4B43Nk7VphwJeRX/Ze"
+    },
+    {
+      "why": "tampered tag",
+      "line": "AUQBAAAAAnS932ce+r76G/Oj7PfKAXWQ8aJVynl7wAmTkKJhTNIYF64Ml5gmwJ03la9Ai7n81DUQvgfb66ka8MUH8K3ljlWCakGxXt4B43Nk7VphwJeRX/Zf"
+    },
+    {
+      "why": "tampered ctr",
+      "line": "AUQBAAAAA3S932ce+r76G/Oj7PfKAXWQ8aJVynl7wAmTkKJhTNIYF64Ml5gmwJ03la9Ai7n81DUQvgfb66ka8MUH8K3ljlWCakGxXt4B43Nk7VphwJeRX/Ze"
+    },
+    {
+      "why": "previous session (other nd)",
+      "line": "AUQBAAAAAW8qCSiXNSiS8wXxnSIVd3S3qxG/7hkA+df09SW5tfe9DjwmkrLmuzsa6Ec2dkcMO2Xih4Fc/PkUBqu5JM/+9V4a6yZ7qB5QMNT1watjO9IQiVizOTrPdvsmQkIxi43qlVrFN0AOzcA96i3UntlcdjEAstk4YzI29WU0kDz3MIlNNg=="
+    },
+    {
+      "why": "wrong direction",
+      "line": "AUQCAAAAAeYw9hgD2UBgeWFtca1xyVaY48GQzB3ZbJBdG3DMfheIkkYGnMaxFBe5Q35NyzceXSeqgaQXkXYVb6+XTFj46is="
+    },
+    {
+      "why": "plaintext json",
+      "line": "{\"t\":\"perm_reply\",\"req\":\"r1\",\"decision\":\"allow\"}"
+    },
+    {
+      "why": "bad base64",
+      "line": "!!!!"
+    }
+  ]
+}

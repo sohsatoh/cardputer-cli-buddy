@@ -1,0 +1,17 @@
+{
+  "modules": ["./register.ts"],
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/perm_hook.py\"",
+            "timeout": 3600
+          }
+        ]
+      }
+    ]
+  }
+}

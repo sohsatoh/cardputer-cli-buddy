@@ -1,0 +1,7 @@
+{
+  "name": "cardbuddy",
+  "version": "0.1.0",
+  "description": "Cardputer から権限ダイアログ・AskUserQuestion に答え、プロンプトを送る",
+  "author": { "name": "Soh Satoh" },
+  "types": "./types/index.d.ts"
+}
