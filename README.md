@@ -1,114 +1,116 @@
 # Cardputer CLI Buddy
 
-M5Stack Cardputer-Adv から、BLE 経由で複数の Claude Code CLI セッションを操作する。
+English | [日本語](README.ja.md)
 
-- 権限ダイアログに allow / deny で答える（allow は全文を表示できたときだけ）
-- AskUserQuestion に答える
-- プロンプトを送る
-- セッションログを読む
-- かなで入力する（Tab で 英数 / ひらがな / カタカナ を切り替える）
+Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over BLE.
 
-## 構成
+- Answer permission dialogs with allow / deny (allow is only offered when the full request fits on screen)
+- Answer AskUserQuestion prompts
+- Send prompts
+- Read session logs
+- Type in Japanese kana (Tab cycles between alphanumeric / hiragana / katakana)
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph host["ホスト（macOS）"]
-    cc1["Claude Code セッション<br>+ mod/"]
-    cc2["Claude Code セッション<br>+ mod/"]
-    d["daemon/（buddyd）"]
+  subgraph host["Host (macOS)"]
+    cc1["Claude Code session<br>+ mod/"]
+    cc2["Claude Code session<br>+ mod/"]
+    d["daemon/ (buddyd)"]
   end
   dev["Cardputer-Adv<br>device/"]
   cc1 -- "HTTP over Unix socket<br>~/.cardbuddy/buddyd.sock" --> d
   cc2 -- "HTTP over Unix socket" --> d
-  d <-- "BLE（NUS）<br>AES-128-CTR + HMAC-SHA256" --> dev
+  d <-- "BLE (NUS)<br>AES-128-CTR + HMAC-SHA256" --> dev
 ```
 
-| ディレクトリ | 役割 |
+| Directory | Role |
 | --- | --- |
-| `mod/` | Claude Code の plugin。function hooks がセッションの登録、AskUserQuestion の中継、プロンプトの投入、セッションログの送信を行う。同梱の `PermissionRequest` コマンド hook が、端末のダイアログと並行してデバイスの回答を待つ。 |
-| `daemon/` | buddyd（Python、bleak）。Unix socket `~/.cardbuddy/buddyd.sock` で mod と話し、BLE でデバイスとつなぐ。CLI `buddy`（`pair` / `status` / `install-agent`）を含む。 |
-| `device/` | Cardputer-Adv 用の MicroPython アプリ。[moremas/build-with-claude](https://github.com/moremas/build-with-claude) の buddy（Apache-2.0）を改変したもの。 |
-| `PROTOCOL.md` | buddyd とデバイスの間の通信仕様と脅威モデル。 |
-| `docs/daemon-api.md` | mod と buddyd の間の HTTP API。 |
-| `testvectors/` | 暗号層のテストベクタ。daemon と device の両方のテストで使う。 |
+| `mod/` | Claude Code plugin. Its function hooks register the session, relay AskUserQuestion, inject prompts, and forward the session log. A bundled `PermissionRequest` command hook waits for the device's answer alongside the terminal dialog. |
+| `daemon/` | buddyd (Python, bleak). Talks to the mod over the Unix socket `~/.cardbuddy/buddyd.sock` and to the device over BLE. Includes the `buddy` CLI (`pair` / `status` / `install-agent`). |
+| `device/` | MicroPython app for the Cardputer-Adv, a modified version of the buddy from [moremas/build-with-claude](https://github.com/moremas/build-with-claude) (Apache-2.0). |
+| `PROTOCOL.md` | Wire protocol between buddyd and the device, and the threat model (Japanese). |
+| `docs/daemon-api.md` | HTTP API between the mod and buddyd (Japanese). |
+| `testvectors/` | Test vectors for the crypto layer, shared by the daemon and device tests. |
 
-## 必要なもの
+## Requirements
 
 - M5Stack Cardputer-Adv
-- macOS（`buddy install-agent` は launchd 用。buddyd 自体は bleak が動く環境なら動く）
-- Python 3.10 以上と [uv](https://docs.astral.sh/uv/)
+- macOS (`buddy install-agent` targets launchd; buddyd itself runs anywhere bleak does)
+- Python 3.10+ and [uv](https://docs.astral.sh/uv/)
 - Claude Code
 
-## セットアップ
+## Setup
 
-以下のコマンドは、リポジトリのルートで実行する。シリアルポートは環境ごとに異なる（macOS では `/dev/cu.usbmodem*`）。
+Run the commands below from the repository root. The serial port name depends on your machine (`/dev/cu.usbmodem*` on macOS).
 
-### 1. ファームウェアを書き込む
+### 1. Flash the firmware
 
-UIFlow2 の **v2.4.2** を書き込む。それより新しい版は使わない。
+Flash UIFlow2 **v2.4.2**. Do not use a newer release.
 
-- v2.4.3 以降（ESP-IDF 5.5 系）には、Cardputer-Adv のマイクが無音になる回帰がある（[m5stack/uiflow-micropython#97](https://github.com/m5stack/uiflow-micropython/pull/97)、[espressif/esp-idf#18621](https://github.com/espressif/esp-idf/issues/18621)）。
-- M5Burner で「UIFlow2.0 Cardputer-Adv」を選び、版に 2.4.2 を指定して書き込む。
-- Cardputer-Adv は USB ネイティブのため、ダウンロードモードへはボタンでしか入れない。背面の BtnG0 を押したまま BtnRST を押して離し、その後 BtnG0 を離す。
+- v2.4.3 and later (ESP-IDF 5.5) have a regression that leaves the Cardputer-Adv microphone silent ([m5stack/uiflow-micropython#97](https://github.com/m5stack/uiflow-micropython/pull/97), [espressif/esp-idf#18621](https://github.com/espressif/esp-idf/issues/18621)).
+- In M5Burner, pick "UIFlow2.0 Cardputer-Adv" and select version 2.4.2.
+- The Cardputer-Adv uses native USB, so download mode can only be entered with the buttons: hold BtnG0 on the back, press and release BtnRST, then release BtnG0.
 
-v2.4.2 は、通常起動時の USB を TinyUSB CDC として出す。リセット後にシリアルポートが戻ってこない場合は、USB ケーブルを挿し直す。
+On v2.4.2, the USB port shows up as a TinyUSB CDC device during normal boot. If the serial port does not come back after a reset, unplug and replug the USB cable.
 
-### 2. デバイスにアプリを入れる
+### 2. Install the app on the device
 
 ```sh
 uv --directory daemon run python ../device/scripts/deploy.py --port /dev/cu.usbmodemXXXX
 ```
 
-`device/scripts/deploy.py` は次のことを行う。
+`device/scripts/deploy.py` does the following:
 
-1. 大きいモジュール（`crypto`、`buddy_protocol`、`buddy_ble`、`buddy_ui_cp`、`kana`）を mpy-cross で `.mpy` にする。デバイスの空きメモリは約 60KB しかなく、`.py` のままでは import 時のコンパイルでメモリが足りなくなるため。
-2. `.mpy` と、`.py` のまま入れるファイル（`main.py`、`apps/*.py` など）を `/flash/` に書き込む。
-3. デバイス上の同名の `.py` を消す。MicroPython は `.mpy` より `.py` を優先して import するため。
-4. NVS の `uiflow.boot_option` を 2 にする。起動時に UIFlow のランチャーではなく `/flash/main.py` が動くようになる。
-5. デバイスを再起動する。
+1. Compiles the large modules (`crypto`, `buddy_protocol`, `buddy_ble`, `buddy_ui_cp`, `kana`) to `.mpy` with mpy-cross. The device has only about 60 KB of free memory, which is not enough to compile them from `.py` at import time.
+2. Writes the `.mpy` files and the files that stay as `.py` (`main.py`, `apps/*.py`, and so on) to `/flash/`.
+3. Removes any `.py` file on the device with the same name as a `.mpy`, because MicroPython imports `.py` in preference to `.mpy`.
+4. Sets the NVS key `uiflow.boot_option` to 2, so the device boots into `/flash/main.py` instead of the UIFlow launcher.
+5. Reboots the device.
 
-mpy-cross の版は、デバイスの MicroPython に合わせる必要がある。UIFlow2 v2.4.2 は MicroPython 1.25（mpy v6.3）なので、既定値の `--mpy-cross 1.25` のままでよい。mpy-cross は `uvx` で取得する。`--port` を省くと、コンパイルだけを行って結果を表示する。
+The mpy-cross version must match the device's MicroPython. UIFlow2 v2.4.2 ships MicroPython 1.25 (mpy v6.3), which is the default `--mpy-cross 1.25`. mpy-cross is fetched with `uvx`. Without `--port`, the script only compiles and prints the result.
 
-### 3. 鍵を共有する（`buddy pair`）
+### 3. Share the key (`buddy pair`)
 
 ```sh
 uv --directory daemon run buddy pair --port /dev/cu.usbmodemXXXX
 ```
 
-- 32 byte の鍵を作り、ホストの `~/.cardbuddy/key`（0600）と、デバイスの `/flash/cardbuddy.key` に USB 経由で書き込む。鍵は BLE には流さない。
-- デバイスの広告名（`Claude_` + BT MAC の下位 6 桁）を `~/.cardbuddy/device` に保存する。buddyd はこの名前に完全一致で接続する。
-- 既存の鍵があればそれを使う。作り直すときは `--rotate` を付ける。
-- 書き込んだら、デバイスをリセットして鍵を読み込ませる。
+- Generates a 32-byte key and writes it over USB to `~/.cardbuddy/key` (mode 0600) on the host and `/flash/cardbuddy.key` on the device. The key never goes over BLE.
+- Saves the device's advertised name (`Claude_` followed by the last 6 hex digits of its BT MAC) to `~/.cardbuddy/device`. buddyd connects only to a device with exactly this name.
+- Reuses the existing key if there is one. Pass `--rotate` to generate a new key.
+- Reset the device afterwards so it loads the key.
 
-### 4. buddyd を起動する
+### 4. Start buddyd
 
-手元で動かす場合は次のとおり。
+To run it in the foreground:
 
 ```sh
 uv --directory daemon run buddyd
 ```
 
-ログイン時に自動で起動させる場合は、launchd の LaunchAgent を登録する。
+To start it automatically at login, register a launchd LaunchAgent:
 
 ```sh
 uv --directory daemon run buddy install-agent
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sohsatoh.cardbuddy.buddyd.plist
 ```
 
-- ログは `~/.cardbuddy/buddyd.log` に出る。
-- 状態は `uv --directory daemon run buddy status` で確認できる。
-- 鍵を作り直したときは、buddyd を再起動する（`launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd`）。
-- 初回は、macOS が Bluetooth の利用許可を求めることがある。
+- Logs go to `~/.cardbuddy/buddyd.log`.
+- Check the status with `uv --directory daemon run buddy status`.
+- After rotating the key, restart buddyd (`launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd`).
+- On first run, macOS may ask for permission to use Bluetooth.
 
-### 5. Claude Code に mod を読み込ませる
+### 5. Load the mod into Claude Code
 
-起動ごとに指定する場合は次のとおり。
+Per invocation:
 
 ```sh
 claude --plugin-dir /path/to/cardputer-cli-buddy/mod
 ```
 
-常に読み込ませる場合は、settings の `env` に `CLAUDE_CODE_PLUGIN_DIRS` を設定する。
+To load it every time, set `CLAUDE_CODE_PLUGIN_DIRS` under `env` in your settings:
 
 ```json
 {
@@ -118,82 +120,82 @@ claude --plugin-dir /path/to/cardputer-cli-buddy/mod
 }
 ```
 
-buddyd に登録されたセッションには番号（1〜9）が付き、端末のステータスラインに `Buddy #n` と出る。デバイスの一覧の番号と一致する。
+Each session registered with buddyd gets a number from 1 to 9, shown as `Buddy #n` in the terminal status line. It matches the number in the device's session list.
 
-### 6. デバイスでアプリを起動する
+### 6. Launch the app on the device
 
-デバイスは起動するとランチャー（`main.py`）を表示する。`;` / `.`（または `,` / `/`、`W` / `S`）で `claude_buddy` を選び、Enter で起動する。アプリを `Q` で終えるとデバイスが再起動し、ランチャーに戻る。
+The device boots into a launcher (`main.py`). Select `claude_buddy` with `;` / `.` (or `,` / `/`, or `W` / `S`) and press Enter. Quitting the app with `Q` reboots the device back into the launcher.
 
-## キー操作
+## Keys
 
-Cardputer-Adv の矢印キーは、単体で押すと `;` `,` `.` `/` の文字になる。以下の「↑↓」は、単体の `;` `.` と Fn+↑↓ のどちらでもよい。Esc は `` ` `` の位置のキーである。
+Pressed on their own, the Cardputer-Adv arrow keys type `;` `,` `.` `/`. Below, "↑↓" means either the bare `;` `.` keys or Fn+↑↓. Esc is the `` ` `` key.
 
-| 画面 | 操作 |
+| Screen | Keys |
 | --- | --- |
-| 一覧 | `1`〜`9` / ↑↓ で選択、Enter で入力、`l` か Fn+→ でログ、`Q` で終了 |
-| ログ | ↑↓ でスクロール（上端で古いページを読み込む）、`r` で再読み込み、Enter で入力、Esc で一覧へ |
-| perm | `Y` で allow、`N` で deny、内容が長いときは ↑↓ でスクロール |
-| ask | `1`〜`4` / ↑↓ で選択、Space で複数選択のトグル、Enter で確定 |
-| 入力 | 下表 |
+| Session list | `1`–`9` / ↑↓ select, Enter compose a prompt, `l` or Fn+→ open the log, `Q` quit |
+| Log | ↑↓ scroll (older pages load at the top), `r` reload, Enter compose a prompt, Esc back to the list |
+| Permission | `Y` allow, `N` deny, ↑↓ scroll long requests |
+| Question | `1`–`4` / ↑↓ select, Space toggle (multi-select), Enter confirm |
+| Prompt input | See below |
 
-入力画面のキーは次のとおり。
+Prompt input keys:
 
-| キー | 動作 |
+| Key | Action |
 | --- | --- |
-| Fn+← / Fn+→ | カーソルを左右に動かす |
-| Fn+↑ / Fn+↓ | カーソルを上下の行に動かす |
-| Del | カーソルの前の 1 文字を消す（未確定のローマ字があれば、それを先に消す） |
-| Enter | 送信する |
-| Esc | 取り消して元の画面に戻る |
-| Tab | 英数 / ひらがな / カタカナ を切り替える |
+| Fn+← / Fn+→ | Move the cursor left / right |
+| Fn+↑ / Fn+↓ | Move the cursor up / down a line |
+| Del | Delete the character before the cursor (pending romaji is deleted first) |
+| Enter | Send |
+| Esc | Cancel and go back |
+| Tab | Cycle alphanumeric / hiragana / katakana |
 
-- 入力画面では、単体の `;` `,` `.` `/` は文字として入る。
-- かなはローマ字で入力する。漢字への変換はしない。未確定のローマ字は水色の下線付きで表示し、Enter・矢印・Tab を押す前に確定する。
-- Tab は `+` と同じキーコードで届くため、`+` は入力できない。
-- プロンプトは最大 500 文字。
-- perm は、全文を表示できないとき（`full` が false のとき）は「全文が長すぎます：端末で確認」と出し、`N` だけを受け付ける。
-- perm / ask が届いてから 400 ms の間は、確定キー（`Y` / `N` / Enter）を受け付けない。一覧を操作していた指で誤って答えないようにするため。
-- 入力中に perm / ask が届いても、入力画面はそのまま残り、件数だけを表示する。Esc で戻ると回答できる。
+- In the input screen, the bare `;` `,` `.` `/` keys type those characters.
+- Kana are typed as romaji. There is no kanji conversion. Pending romaji is shown underlined in cyan and is committed before Enter, an arrow key, or Tab takes effect.
+- Tab arrives with the same key code as `+`, so `+` cannot be typed.
+- Prompts are limited to 500 characters.
+- When a permission request does not fit on screen in full (`full` is false), the device shows a warning to check the terminal and accepts only `N`.
+- For 400 ms after a permission request or question appears, the confirming keys (`Y` / `N` / Enter) are ignored, so a keypress meant for the session list cannot answer it by accident.
+- If a permission request or question arrives while you are typing, the input screen stays and shows the number of pending requests. Press Esc to go back and answer.
 
-## セキュリティ
+## Security
 
-詳細と脅威モデルは [PROTOCOL.md](PROTOCOL.md) を参照。要点は次のとおり。
+See [PROTOCOL.md](PROTOCOL.md) (Japanese) for the details and the threat model. In short:
 
-- BLE の上に、アプリ層の暗号化を重ねる。AES-128-CTR と HMAC-SHA256（Encrypt-then-MAC）を使い、接続ごとに HKDF-SHA256 でセッション鍵を導出する。過去の接続で録ったフレームを再送しても、MAC の検証で落ちる。
-- 共有鍵は USB 経由で書き込み、BLE には流さない。
-- デバイスは、perm の全文を表示できたときだけ allow を送る。
-- 次のものは守らない。
-  - DoS（第三者の central が先につなぐ、電波妨害など）
-  - トラフィック解析
-  - 鍵の保護（ホストとデバイスに平文で保存する）
-  - 同じユーザー権限で動くプロセス（Unix socket は 0600 で、同じユーザーは信頼する）
+- An application-layer encryption sits on top of BLE: AES-128-CTR with HMAC-SHA256 (encrypt-then-MAC), with per-connection session keys derived by HKDF-SHA256. Frames recorded from an earlier connection fail MAC verification when replayed.
+- The shared key is written over USB and never sent over BLE.
+- The device sends allow only for permission requests it could display in full.
+- Out of scope:
+  - Denial of service (a third-party central connecting first, jamming, and so on)
+  - Traffic analysis
+  - Key protection (the key is stored in plaintext on the host and the device)
+  - Other processes running as the same user (the Unix socket is mode 0600, and the same user is trusted)
 
-## テスト
+## Tests
 
-daemon、device、mod の Python のテストは、次のコマンドでまとめて実行する。device のテストは、M5 の API の偽物を使ってホスト上で動く。
+Run the Python tests for the daemon, device, and mod together. The device tests run on the host against a fake M5 API.
 
 ```sh
 uv --directory daemon run pytest -q tests ../device/tests ../mod/tests
 ```
 
-mod の TypeScript のテストは、次のコマンドで実行する。
+Run the mod's TypeScript tests with:
 
 ```sh
 claude plugin test mod
 ```
 
-## 制限事項
+## Limitations
 
-- 表示できるセッションは 9 件まで。10 件目以降は、空きができるまで番号が付かず、デバイスに出ない。
-- 計画の承認（ExitPlanMode）はデバイスでは扱わず、端末で行う。
-- AskUserQuestion は、選択肢が 2〜4 個の問いだけをデバイスに送る。それ以外は端末で答える。
-- buddyd がデバイスとつながっていないときや、セッションに番号が無いときは、権限ダイアログは端末だけに出る。
-- 漢字変換はできない。
-- UIFlow2 は v2.4.2 に固定する（「ファームウェアを書き込む」を参照）。
-- ランチャーは起動時に、upstream から引き継いだ `device/wifi_event.py` の Wi-Fi（SSID `cardputer`）への接続を試みる。不要なら、このファイルの SSID とパスワードを書き換えるか、デバイスから削除する。
+- At most 9 sessions are shown. Further sessions get no number and stay off the device until a slot frees up.
+- Plan approval (ExitPlanMode) is not handled on the device; approve plans in the terminal.
+- Only questions with 2 to 4 options are sent to the device. Others must be answered in the terminal.
+- When buddyd is not connected to the device, or the session has no number, permission dialogs appear only in the terminal.
+- No kanji conversion.
+- UIFlow2 must stay on v2.4.2 (see "Flash the firmware").
+- At boot, the launcher tries to join the Wi-Fi network (SSID `cardputer`) defined in `device/wifi_event.py`, inherited from upstream. If you do not want this, change the SSID and password in that file or remove it from the device.
 
-## ライセンス
+## License
 
-[Apache License 2.0](LICENSE)。著作権表示と帰属は [NOTICE](NOTICE) を参照。
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for copyright and attribution.
 
-`device/` は [moremas/build-with-claude](https://github.com/moremas/build-with-claude)（Apache-2.0）の buddy を改変したもの。upstream の著作権表示と改変内容は [device/NOTICE](device/NOTICE) と [device/LICENSE-THIRD-PARTY.md](device/LICENSE-THIRD-PARTY.md) を参照。
+`device/` is a modified version of the buddy from [moremas/build-with-claude](https://github.com/moremas/build-with-claude) (Apache-2.0). See [device/NOTICE](device/NOTICE) and [device/LICENSE-THIRD-PARTY.md](device/LICENSE-THIRD-PARTY.md) for the upstream copyright notice and the list of modifications.
