@@ -39,6 +39,8 @@ import os
 import time
 from micropython import const
 
+import buddy_protocol
+
 
 _IRQ_CENTRAL_CONNECT = const(1)
 _IRQ_CENTRAL_DISCONNECT = const(2)
@@ -247,9 +249,9 @@ class BuddyBLE:
         self._conn = None
         self._mtu = 23
         # 送信は 1 本の FIFO に通す。音声と JSON の行が途中で混ざると host で両方壊れるため
-        self._txq = []
-        self._txo = 0
+        self._tx = buddy_protocol.TxQueue(self._write)
         self._tx_reset = False
+        self._paused = False  # Wi-Fi のセッション中は広告を止め、接続も受けない
         self._encrypted = False
         self._rx_buf = bytearray()
         self._rx_skip = False
@@ -343,6 +345,8 @@ class BuddyBLE:
             # settle, and an exception in the scheduler thread can't
             # kill the IRQ handler like it could when we called
             # _advertise inline here.
+            if self._paused:
+                return
             try:
                 micropython.schedule(self._rearm_adv, 0)
             except RuntimeError:
@@ -435,6 +439,8 @@ class BuddyBLE:
         other apps on the launcher still work.
         """
         for attempt in range(5):
+            if self._paused:
+                return
             # Stop any half-configured adv slot before retrying. Some
             # of the failure modes stick until we explicitly clear.
             try:
@@ -515,12 +521,13 @@ class BuddyBLE:
                 last_err = e
         raise last_err if last_err is not None else OSError("advertise failed with no OSError")
 
+    kind = "BLE"
+
     def send_line(self, payload: bytes) -> bool:
         """1 行をキューに積み、キューが空くまで送る。リンクが無ければ False。
 
         NimBLE の送信バッファが詰まっている間（ENOMEM）は待って送り直す。
-        _NOTIFY_RETRY_MS を過ぎても送り切れない行は、捨てずにキューに残して
-        メインループの pump() に任せる（送りかけを捨てると host 側の行が壊れる）。
+        時間内に送り切れない行は、捨てずにキューに残してメインループの pump() に任せる。
         """
         if self._conn is None:
             return False
@@ -528,58 +535,68 @@ class BuddyBLE:
             return False
         if not payload.endswith(b"\n"):
             payload = payload + b"\n"
-        self.enqueue(payload)
-        t0 = time.ticks_ms()
-        while True:
-            r = self.pump()
-            if r is not False:
-                return r is True
-            if time.ticks_diff(time.ticks_ms(), t0) > _NOTIFY_RETRY_MS:
-                print("buddy_ble: notify still busy, leave it to pump()")
-                return True
-            time.sleep_ms(1)
+        self._check_reset()
+        return self._tx.send(payload, _NOTIFY_RETRY_MS)
 
     def enqueue(self, line):
         """`\n` で終わる 1 行を、送らずにキューへ積む。"""
         self._check_reset()
-        self._txq.append(line)
+        return self._tx.put(line)
 
     def tx_idle(self):
         self._check_reset()
-        return not self._txq
+        return self._tx.idle()
 
     def _check_reset(self):
         if self._tx_reset:
             self._tx_reset = False
-            self._txq = []
-            self._txo = 0
+            self._tx.clear()
 
     def pump(self):
         """キューを送れるだけ送る。送り切れば True、ENOMEM で止まれば False、リンクが無いか失敗なら None。"""
         self._check_reset()
-        while self._txq:
-            conn = self._conn
-            if conn is None:
-                self._txq = []
-                self._txo = 0
-                return None
-            line = self._txq[0]
-            step = self._mtu - 3
-            mv = memoryview(line)
-            while self._txo < len(line):
+        return self._tx.pump()
+
+    def _write(self, mv):
+        conn = self._conn
+        if conn is None:
+            raise OSError(107)  # ENOTCONN
+        chunk = mv[: self._mtu - 3]
+        try:
+            self._ble.gatts_notify(conn, self._tx_h, chunk)
+        except OSError as e:
+            if e.args and e.args[0] == _ENOMEM:
+                return 0
+            raise
+        return len(chunk)
+
+    def hello_failed(self):
+        self.disconnect()
+
+    @property
+    def paused(self):
+        return self._paused
+
+    def pause(self):
+        """広告を止めて接続を切る。スタックは止めない（Wi-Fi の後に active(True) し直すと固まるため）。"""
+        self._paused = True
+        try:
+            self._ble.gap_advertise(None)
+        except OSError:
+            pass
+        self.disconnect()
+
+    def resume(self):
+        self._paused = False
+        if self._conn is None:
+            try:
+                self._advertise()
+            except OSError as e:
+                print("buddy_ble: resume advertise failed, scheduling retry:", e)
                 try:
-                    self._ble.gatts_notify(conn, self._tx_h, mv[self._txo : self._txo + step])
-                except OSError as e:
-                    if e.args and e.args[0] == _ENOMEM:
-                        return False
-                    print("buddy_ble: notify failed:", e)
-                    self._txq = []
-                    self._txo = 0
-                    return None
-                self._txo += step
-            self._txq.pop(0)
-            self._txo = 0
-        return True
+                    micropython.schedule(self._rearm_adv, 0)
+                except RuntimeError:
+                    pass
 
     def disconnect(self):
         if self._conn is not None:

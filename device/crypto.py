@@ -26,8 +26,66 @@ except ImportError:
             def __init__(self, key, mode):
                 self._e = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
 
-            def encrypt(self, data):
-                return self._e.update(data)
+            def encrypt(self, data, out=None):
+                r = self._e.update(bytes(data))
+                if out is None:
+                    return r
+                out[:] = r
+                return out
+
+
+_B64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+try:
+    import micropython
+
+    @micropython.viper
+    def _xor(dst: ptr8, src: ptr8, n: int):  # noqa: F821
+        for i in range(n):
+            dst[i] = dst[i] ^ src[i]
+
+    @micropython.viper
+    def _b64_into(src: ptr8, n: int, dst: ptr8, tbl: ptr8) -> int:  # noqa: F821
+        i = 0
+        j = 0
+        while i + 2 < n:
+            a = src[i]
+            b = src[i + 1]
+            c = src[i + 2]
+            dst[j] = tbl[a >> 2]
+            dst[j + 1] = tbl[((a & 3) << 4) | (b >> 4)]
+            dst[j + 2] = tbl[((b & 15) << 2) | (c >> 6)]
+            dst[j + 3] = tbl[c & 63]
+            i += 3
+            j += 4
+        if n - i == 1:
+            a = src[i]
+            dst[j] = tbl[a >> 2]
+            dst[j + 1] = tbl[(a & 3) << 4]
+            dst[j + 2] = 61
+            dst[j + 3] = 61
+            j += 4
+        elif n - i == 2:
+            a = src[i]
+            b = src[i + 1]
+            dst[j] = tbl[a >> 2]
+            dst[j + 1] = tbl[((a & 3) << 4) | (b >> 4)]
+            dst[j + 2] = tbl[(b & 15) << 2]
+            dst[j + 3] = 61
+            j += 4
+        dst[j] = 10
+        return j + 1
+
+except Exception:  # CPython（テスト）には viper が無い
+
+    def _xor(dst, src, n):
+        for i in range(n):
+            dst[i] ^= src[i]
+
+    def _b64_into(src, n, dst, tbl):
+        b = binascii.b2a_base64(bytes(src[:n]))
+        dst[: len(b)] = b
+        return len(b)
 
 
 VER = 0x01
@@ -36,6 +94,7 @@ DATA = 0x44  # 'D'
 AUDIO = 0x41  # 'A'
 ROLE_HOST = 0x68  # 'h'
 ROLE_DEVICE = 0x64  # 'd'
+ROLE_ACK = 0x6B  # 'k'
 DIR_H2D = 0x01
 DIR_D2H = 0x02
 INFO = b"cardbuddy v1"
@@ -71,6 +130,14 @@ def hello(role, nonce):
     return _b64enc(bytes([VER, HELLO, role]) + nonce)
 
 
+def hello_tag(key, label, nh, nd):
+    return hmac_sha256(key, b"cardbuddy v1 hello " + label + nh + nd)[:16]
+
+
+def hello_device(key, nh, nd):
+    return _b64enc(bytes([VER, HELLO, ROLE_DEVICE]) + nd + hello_tag(key, b"d", nh, nd))
+
+
 def decode_line(line):
     """1 行（`\\n` 有無どちらでも）を frame の bytes に戻す。"""
     line = line.rstrip(b"\n")
@@ -86,19 +153,31 @@ def _b64enc(raw):
     return binascii.b2a_base64(raw).rstrip(b"\n") + b"\n"
 
 
-def _ctr(enc_key, d, ctr, data):
+def _ctr(enc_key, d, ctr, data, blk=None):
+    """data を AES-CTR で暗号化（復号）した bytearray を返す（長さは 16 の倍数に切り上げ、先頭 len(data) が結果）。
+
+    実機では音声 1 フレームごとに呼ぶので、一時オブジェクトを作らないよう、鍵ストリームを
+    in-place で作って viper で XOR する（多倍長整数を使う版は 1 フレームで約 26KB を確保し、
+    GC ヒープが IDF ヒープを奪って伸びる原因になった）。
+    """
     n = (len(data) + 15) // 16
-    if not n:
-        return b""
-    blk = bytearray(16 * n)
+    if blk is None:
+        blk = bytearray(16 * n)
     head = bytes([d]) + struct.pack(">I", ctr) + bytes(7)
     for i in range(n):
         blk[16 * i : 16 * i + 12] = head
         struct.pack_into(">I", blk, 16 * i + 12, i)
-    ks = aes(enc_key, _ECB).encrypt(blk)
-    size = len(data)
-    # 1 byte ずつの XOR より、多倍長整数 1 回の XOR の方が実機で 2 倍以上速い
-    return (int.from_bytes(data, "big") ^ int.from_bytes(ks[:size], "big")).to_bytes(size, "big")
+    if n:
+        ks = memoryview(blk)[: 16 * n]
+        aes(enc_key, _ECB).encrypt(ks, ks)
+        _xor(blk, data, len(data))
+    return blk
+
+
+def seal_buffers(n):
+    """平文 n byte までを seal_into で包むための作業バッファ（frame, 鍵ストリーム, 行）。"""
+    size = 7 + n + 16
+    return bytearray(size), bytearray(16 * ((n + 15) // 16)), bytearray(4 * ((size + 2) // 3) + 1)
 
 
 def _eq(a, b):
@@ -115,6 +194,9 @@ class Session:
 
     def __init__(self, enc_key, mac_key, tx_dir):
         self.enc_key, self.mac_key = enc_key, mac_key
+        k = mac_key + bytes(64 - len(mac_key))
+        self._ipad = bytes(b ^ 0x36 for b in k)
+        self._opad = bytes(b ^ 0x5C for b in k)
         self.tx_dir = tx_dir
         self.rx_dir = DIR_D2H if tx_dir == DIR_H2D else DIR_H2D
         self.tx_ctr = 0
@@ -127,14 +209,39 @@ class Session:
             s = json.dumps(msg)
         return self.seal_bytes(s.encode())
 
-    def seal_bytes(self, pt, kind=DATA):
-        if len(pt) > MAX_PLAINTEXT:
+    def _mac(self, msg):
+        inner = hashlib.sha256(self._ipad)
+        inner.update(msg)
+        outer = hashlib.sha256(self._opad)
+        outer.update(inner.digest())
+        return outer.digest()
+
+    def _seal(self, pt, kind, frame, blk):
+        n = len(pt)
+        if n > MAX_PLAINTEXT:
             raise FrameError("plaintext too long")
         self.tx_ctr += 1
-        head = bytes([VER, kind, self.tx_dir]) + struct.pack(">I", self.tx_ctr)
-        ct = _ctr(self.enc_key, self.tx_dir, self.tx_ctr, pt)
-        tag = hmac_sha256(self.mac_key, head + ct)[:16]
-        return _b64enc(head + ct + tag)
+        frame[0], frame[1], frame[2] = VER, kind, self.tx_dir
+        struct.pack_into(">I", frame, 3, self.tx_ctr)
+        mv = memoryview(frame)
+        mv[7 : 7 + n] = memoryview(_ctr(self.enc_key, self.tx_dir, self.tx_ctr, pt, blk))[:n]
+        mv[7 + n : 7 + n + 16] = self._mac(mv[: 7 + n])[:16]
+        return mv[: 7 + n + 16]
+
+    def seal_bytes(self, pt, kind=DATA):
+        frame = self._seal(pt, kind, bytearray(7 + len(pt) + 16), None)
+        line = binascii.b2a_base64(frame)
+        return line if line[-1:] == b"\n" else line + b"\n"
+
+    def seal_into(self, pt, kind, bufs):
+        """seal_bytes と同じ行を、seal_buffers() の作業バッファに作って memoryview で返す。
+
+        音声は 100ms ごとに seal するので、毎回 8KB ほど確保すると GC ヒープが伸び縮みして
+        IDF ヒープを奪い、Wi-Fi のメモリが尽きる（実機）。返す行はバッファを指すので、次に呼ぶまでに送り終えること。
+        """
+        frame, blk, line = bufs
+        f = self._seal(pt, kind, frame, blk)
+        return memoryview(line)[: _b64_into(f, len(f), line, _B64)]
 
     def open(self, line):
         return self.open_raw(decode_line(line))
@@ -145,12 +252,12 @@ class Session:
         if raw[2] != self.rx_dir:
             raise FrameError("wrong direction")
         head, ct, tag = raw[:7], raw[7:-16], raw[-16:]
-        if not _eq(tag, hmac_sha256(self.mac_key, head + ct)[:16]):
+        if not _eq(tag, self._mac(head + ct)[:16]):
             raise FrameError("bad tag")
         ctr = struct.unpack(">I", head[3:7])[0]
         if ctr <= self.rx_ctr:
             raise FrameError("replay")
-        pt = _ctr(self.enc_key, self.rx_dir, ctr, ct)
+        pt = bytes(memoryview(_ctr(self.enc_key, self.rx_dir, ctr, ct))[: len(ct)])
         try:
             msg = json.loads(pt.decode())
         except ValueError:  # UnicodeError も ValueError の派生

@@ -84,7 +84,8 @@ async def _route(hub, reader, method: str, target: str, body: dict):
     url = urlsplit(target)
     p = url.path
     if method == "GET" and p == "/status":
-        return {"connected": hub.link.connected, "device": hub.link.device, "sessions": hub.table.status()}
+        return {"connected": hub.link.connected, "transport": hub.link.transport, "device": hub.link.device,
+                "sessions": hub.table.status()}
     if method == "GET" and p == "/poll":
         q = parse_qs(url.query)
         sid = q.get("sid", [""])[0]

@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 ![Demo: approving a permission prompt, answering AskUserQuestion, and sending a kana prompt from the Cardputer](docs/demo.gif)
 
-Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over BLE.
+Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over Wi-Fi or BLE.
 
 - Answer permission dialogs with allow / deny (allow is only offered when the full request fits on screen)
 - Answer AskUserQuestion prompts
@@ -12,6 +12,7 @@ Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over BLE.
 - Read session logs
 - Type in Japanese kana (Tab cycles between alphanumeric / hiragana / katakana)
 - Dictate a prompt in Japanese or English with the built-in mic, transcribed on-device on the Mac
+- Show the battery level (and charging state) in the header
 
 ## Architecture
 
@@ -25,13 +26,13 @@ flowchart LR
   dev["Cardputer-Adv<br>device/"]
   cc1 -- "HTTP over Unix socket<br>~/.cardbuddy/buddyd.sock" --> d
   cc2 -- "HTTP over Unix socket" --> d
-  d <-- "BLE (NUS)<br>AES-128-CTR + HMAC-SHA256" --> dev
+  d <-- "Wi-Fi (TCP) or BLE (NUS)<br>AES-128-CTR + HMAC-SHA256" --> dev
 ```
 
 | Directory | Role |
 | --- | --- |
 | `mod/` | Claude Code plugin. Its function hooks register the session, relay AskUserQuestion, inject prompts, and forward the session log. A bundled `PermissionRequest` command hook waits for the device's answer alongside the terminal dialog. |
-| `daemon/` | buddyd (Python, bleak). Talks to the mod over the Unix socket `~/.cardbuddy/buddyd.sock` and to the device over BLE. Includes the `buddy` CLI (`pair` / `status` / `install-agent`). |
+| `daemon/` | buddyd (Python, bleak). Talks to the mod over the Unix socket `~/.cardbuddy/buddyd.sock` and to the device over Wi-Fi (TCP) or BLE. Includes the `buddy` CLI (`pair` / `status` / `install-agent`). |
 | `device/` | MicroPython app for the Cardputer-Adv, a modified version of the buddy from [moremas/build-with-claude](https://github.com/moremas/build-with-claude) (Apache-2.0). |
 | `PROTOCOL.md` | Wire protocol between buddyd and the device, and the threat model (Japanese). |
 | `docs/daemon-api.md` | HTTP API between the mod and buddyd (Japanese). |
@@ -84,6 +85,7 @@ uv --directory daemon run buddy pair --port /dev/cu.usbmodemXXXX
 - Generates a 32-byte key and writes it over USB to `~/.cardbuddy/key` (mode 0600) on the host and `/flash/cardbuddy.key` on the device. The key never goes over BLE.
 - Saves the device's advertised name (`Claude_` followed by the last 6 hex digits of its BT MAC) to `~/.cardbuddy/device`. buddyd connects only to a device with exactly this name.
 - Reuses the existing key if there is one. Pass `--rotate` to generate a new key.
+- To use Wi-Fi, add `--wifi`. It prompts for the SSID and password (the password is not echoed) and writes them to `/flash/cardbuddy_wifi.json` on the device in plaintext.
 - Reset the device afterwards so it loads the key.
 
 ### 4. Start buddyd
@@ -105,6 +107,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sohsatoh.cardbuddy.b
 - Check the status with `uv --directory daemon run buddy status`.
 - After rotating the key, restart buddyd (`launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd`).
 - On first run, macOS may ask for permission to use Bluetooth.
+
+Wi-Fi:
+
+- buddyd listens on TCP port 47823 on all interfaces and broadcasts a UDP beacon (`cardbuddy/1 <port>`) to port 47824 every 2 seconds. The device finds the Mac through the beacon and connects to it, so the Mac and the device must be on the same network segment.
+- If the macOS application firewall is on, macOS asks on first run whether to accept incoming connections for buddyd (Python). Allow it, or the device cannot connect over Wi-Fi.
+- Wi-Fi is preferred. While a Wi-Fi session is up, buddyd stops scanning for BLE and drops any BLE connection. When the Wi-Fi session ends, buddyd goes back to BLE automatically. `buddy status` shows which one is in use.
+- Change the port with `buddyd --tcp-port <port>`, or run BLE only with `buddyd --no-wifi` (edit `ProgramArguments` in the LaunchAgent plist to pass these under launchd).
 
 ### 5. Load the mod into Claude Code
 
@@ -186,13 +195,14 @@ Prompt input keys:
 
 See [PROTOCOL.md](PROTOCOL.md) (Japanese) for the details and the threat model. In short:
 
-- An application-layer encryption sits on top of BLE: AES-128-CTR with HMAC-SHA256 (encrypt-then-MAC), with per-connection session keys derived by HKDF-SHA256. Frames recorded from an earlier connection fail MAC verification when replayed.
-- The shared key is written over USB and never sent over BLE.
+- An application-layer encryption sits on top of BLE and TCP: AES-128-CTR with HMAC-SHA256 (encrypt-then-MAC), with per-connection session keys derived by HKDF-SHA256. Frames recorded from an earlier connection fail MAC verification when replayed.
+- The shared key is written over USB and never sent over BLE or Wi-Fi.
+- The Hello exchange proves that both sides hold the key. A host on the LAN that connects to buddyd's TCP port, or a fake beacon that lures the device, cannot establish a session.
 - The device sends allow only for permission requests it could display in full.
 - Out of scope:
-  - Denial of service (a third-party central connecting first, jamming, and so on)
+  - Denial of service (a third-party central connecting first, jamming, fake beacons, flooding the TCP port, and so on; buddyd keeps at most 4 pending TCP handshakes, each limited to 5 seconds)
   - Traffic analysis
-  - Key protection (the key is stored in plaintext on the host and the device)
+  - Key protection (the key and the Wi-Fi password are stored in plaintext on the host and the device)
   - Other processes running as the same user (the Unix socket is mode 0600, and the same user is trusted)
 
 ## Tests
@@ -217,7 +227,6 @@ claude plugin test mod
 - When buddyd is not connected to the device, or the session has no number, permission dialogs appear only in the terminal.
 - No kanji conversion.
 - UIFlow2 must stay on v2.4.2 (see "Flash the firmware").
-- At boot, the launcher tries to join the Wi-Fi network (SSID `cardputer`) defined in `device/wifi_event.py`, inherited from upstream. If you do not want this, change the SSID and password in that file or remove it from the device.
 
 ## License
 

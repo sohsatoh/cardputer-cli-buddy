@@ -24,6 +24,7 @@ def aio(f):
 
 class FakeLink:
     connected = True
+    transport = "ble"
     device = "Claude_ab12cd"
 
     def __init__(self):
@@ -98,7 +99,7 @@ async def test_session_lifecycle_and_status():
         assert await register(path) == (200, {"n": 1})
         assert await register(path, "other-sid", "running") == (200, {"n": 2})
         assert await call(path, "GET", "/status") == (200, {
-            "connected": True, "device": "Claude_ab12cd",
+            "connected": True, "transport": "ble", "device": "Claude_ab12cd",
             "sessions": [{"n": 1, "sid": SID, "state": "idle"}, {"n": 2, "sid": "other-sid", "state": "running"}]})
         assert await call(path, "DELETE", "/session/other-sid") == (200, {})
         assert [s["sid"] for s in (await call(path, "GET", "/status"))[1]["sessions"]] == [SID]

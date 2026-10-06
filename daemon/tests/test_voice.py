@@ -122,6 +122,7 @@ def test_write_wav_removes_file_on_failure(monkeypatch):
 
 class FakeLink:
     connected = True
+    transport = "ble"
     device = "Claude_ab12cd"
 
     def __init__(self):

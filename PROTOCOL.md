@@ -20,6 +20,22 @@ Nordic UART Service (NUS)。GATT 構成は build-with-claude の buddy と同じ
 - 1 行の上限は 4096 byte（base64 後、`\n` 含まず）。超えた行は捨てる。
 - 平文 JSON の上限は 2048 byte（UTF-8）。
 
+### Wi-Fi（TCP）
+
+- buddyd は LAN の TCP ポート（既定 47823）で待ち受ける。デバイスは TCP のクライアントとして接続し、自分ではポートを開かない。
+- 枠は BLE と同じ（1 行 = `base64(frame)` + `\n`、上限 4096 byte）。TCP では write の分割はしない。
+- ホストは、デバイスを見つけてもらうために、2 秒ごとに UDP のビーコンをブロードキャストする（宛先は `255.255.255.255` とサブネットのブロードキャスト、ポート 47824）。中身は ASCII の `cardbuddy/1 <tcp ポート>`。ビーコンは認証しない（偽のビーコンに誘導されても、Hello の鍵の確認で失敗し、DoS にしかならない）。
+- デバイスはビーコンを受けたら、その送信元の IP と、ビーコンにあるポートへ接続する。
+- TCP にはキープアライブが無いので、ホストは 10 秒ごとに `ping` を送り、デバイスは `pong` を返す。どちらの側も、30 秒間何も受け取らなければ切断する。BLE でも同じ `ping` / `pong` を使ってよい。
+- ホストが同時に保持する、確立前の TCP 接続は 4 本までとする。確立したセッションは常に 1 本で、新しいセッションが確立したら古い方を切断する。
+
+### BLE と Wi-Fi の切り替え
+
+- Wi-Fi を優先する。デバイスは BLE のスタックを起動時に一度だけ立ち上げ、以後は止めない（Wi-Fi を使った後に BLE を立ち上げ直すと固まることがあるため）。
+- Wi-Fi の設定（`/flash/cardbuddy_wifi.json`）があれば、デバイスは BLE と並行して Wi-Fi に接続し、ビーコンを待つ。
+- TCP のセッションが確立したら、デバイスは BLE の接続を切り、広告を止める。TCP が切れたら、広告を再開する。
+- ホストは、TCP のセッションがある間は BLE を探さない。TCP が切れたら、BLE の探索を再開する。
+
 ## 鍵
 
 - マスター鍵 `K`：32 byte の乱数。`buddy pair` がホストで生成する。
@@ -35,19 +51,23 @@ Nordic UART Service (NUS)。GATT 構成は build-with-claude の buddy と同じ
 
 全フレームの先頭は `ver = 0x01` と `kind`（1 byte）。
 
-### Hello（`kind = 'H'` 0x48、平文）
+### Hello（`kind = 'H'` 0x48、平文 + 鍵の確認）
 
 ```
-ver(1) ‖ 'H' ‖ role(1) ‖ nonce(16)       = 19 byte
-role: 'h' (0x68) = host, 'd' (0x64) = device
+Hello(h)  = ver ‖ 'H' ‖ 'h' ‖ nh(16)                 = 19 byte   host → device
+Hello(d)  = ver ‖ 'H' ‖ 'd' ‖ nd(16) ‖ tag_d(16)     = 35 byte   device → host
+Hello(k)  = ver ‖ 'H' ‖ 'k' ‖ tag_h(16)              = 19 byte   host → device
+tag_d = HMAC-SHA256(K, "cardbuddy v1 hello d" ‖ nh ‖ nd) の先頭 16 byte
+tag_h = HMAC-SHA256(K, "cardbuddy v1 hello h" ‖ nh ‖ nd) の先頭 16 byte
 ```
 
-1. 接続し、TX の notify を購読したら、ホストは新しい `nh` を乱数で作り、Hello(role='h') を送る。
-2. デバイスは Hello(role='h') を受けるたびに新しい `nd` を乱数で作り、Hello(role='d') を返す。セッション鍵を導出し、送受信カウンタを 0 に戻す。それまでのセッションは捨てる（表示中の perm / ask も消す）。
-3. ホストは Hello(role='d') を受けたらセッション鍵を導出し、カウンタを 0 に戻す。Hello を送ってから 5 秒以内に返事が来なければ切断して、再接続からやり直す。
-4. セッションが確立したら、ホストは `sessions` と、未解決の `perm` / `ask` を送り直す。
+1. 接続したら（BLE は TX の notify を購読したら、TCP は接続を受け付けたら）、ホストは新しい `nh` を乱数で作り、Hello(h) を送る。
+2. デバイスは Hello(h) を受けるたびに新しい `nd` を乱数で作り、Hello(d) を返す。この時点では、それまでのセッションは捨てない（鍵を持たない相手の Hello(h) 1 本で、正規のセッションを壊されないようにするため）。
+3. ホストは Hello(d) の `tag_d` を定数時間比較で検証する。正しければセッション鍵を導出し、カウンタを 0 に戻して Hello(k) を送る。正しくなければ切断する。Hello(h) を送ってから 5 秒以内に正しい Hello(d) が来なければ切断する。
+4. デバイスは Hello(k) の `tag_h` を検証できたときに、セッション鍵を導出してカウンタを 0 に戻し、セッションを確立する。このとき、それまでのセッションを捨てる（表示中の perm / ask も消す）。以後の送信は、確立したリンクにだけ行い、別のリンクから届いた Data は捨てる。Hello(d) を送ってから 5 秒以内に正しい Hello(k) が来なければ、その接続を捨てる（TCP なら切断し、その相手を 60 秒間は候補から外す。BLE なら切断する）。確立前に届いた Data / Audio は捨てる。
+5. セッションが確立したら、ホストは `sessions` と、未解決の `perm` / `ask` を送り直す。
 
-Hello は認証しない。Hello を偽造・改ざんされても、鍵が食い違って以後の Data がすべて MAC で落ちるだけ（DoS）になる。
+Hello の交換で、両者がマスター鍵 `K` を持っていることを確かめる。鍵を持たない相手は、セッションを確立できない（LAN 上の第三者が buddyd の TCP ポートにつないだ場合や、偽のビーコンでデバイスを誘導した場合も同じ）。
 
 ### Data（`kind = 'D'` 0x44）
 
@@ -90,6 +110,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 | `ask` | `n, req, id, name, qs: [{q, h, o: [label…], m}]` | AskUserQuestion。 |
 | `resolved` | `req, by` | `by`: `terminal` / `device` / `abort`。表示中の perm / ask を消す。 |
 | `ack_prompt` | `n, ok, queued` | `prompt` の結果。`ok=false` は対象セッションが無い場合。 |
+| `ping` | （なし） | 生存確認。デバイスは `pong` を返す。 |
 | `log` | `n, p, more, items: [{r, x, c}]` | `log_req` への応答。セッションログの 1 ページ（古い順）。 |
 | `voice_text` | `vid, text` | 音声の文字起こし結果。 |
 | `voice_error` | `vid, err` | 文字起こしの失敗（`err` は表示用の短い文）。 |
@@ -120,6 +141,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 | `perm_reply` | `req, decision` | `decision`: `allow` / `deny`。 |
 | `ask_reply` | `req, answers` | `answers`: 問いごとの選択 index の配列（`[[0], [1, 3]]`）。 |
 | `prompt` | `n, id, text` | `text` は最大 500 文字。 |
+| `pong` | （なし） | `ping` への応答。 |
 | `log_req` | `n, id, p` | セッションログの `p` ページ目（0 が最新）を要求する。 |
 | `voice_begin` | `vid, lang` | 録音の開始。`lang` は `ja-JP` / `en-US`。以降の Audio はこの録音のもの。 |
 | `voice_end` | `vid` | 録音の終了。ホストは文字起こしして `voice_text` か `voice_error` を返す。 |
@@ -144,6 +166,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 - 形式は 16kHz・モノラル・G.711 μ-law 固定。1 回の録音は最大 60 秒（960,000 byte）。超えた分の Audio は捨て、`voice_end` で上限までの音声を文字起こしする。
 - 録音中に新しい `voice_begin` が来たら、前の録音は取り消し扱いにする。切断・再 Hello でも取り消す。
 - ホストは音声を一時ファイル（0600）に書いて文字起こしし、結果にかかわらず終了後に削除する。音声も認識結果もログに出さない（長さと所要時間だけ出す）。
+- デバイスは録音中の音声（μ-law のフレーム）を一時的に flash（`/flash/cardbuddy_voice.tmp`）に保存し、リンクが受け付ける範囲で先頭から順に送る。フレームは捨てないので、`seq` の欠けは通常起きない。録音を止めたら、未送信の分をすべて送ってから `voice_end` を送る。送り終えたとき・取り消し・切断・エラーのとき、およびアプリの起動時に残っていたときに、このファイルを消す。
 - 文字起こしの結果はプロンプトとしては投入しない。デバイスは結果を入力画面に入れ、ユーザーが確認・編集して Enter を押したときに通常の `prompt` として送る。
 
 ## タイミング
@@ -163,7 +186,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 
 範囲外とするもの：
 
-- **DoS**：NUS の接続は 1 本だけなので、第三者の central が先につなぐと正規ホストが締め出される。電波妨害や Hello の改ざんも同様で、いずれも認証では防げない。
+- **DoS**：NUS の接続は 1 本だけなので、第三者の central が先につなぐと正規ホストが締め出される。電波妨害や Hello の改ざん、偽のビーコン、buddyd の TCP ポートへの大量接続も同様で、いずれも認証では防げない（確立前の TCP 接続の数と時間を絞って緩和する）。
 - **トラフィック解析**：フレームの長さとタイミングは秘匿しない。
-- **鍵の保護**：ホストの `~/.cardbuddy/key` と、デバイスの `/flash/cardbuddy.key` は平文で保存する。デバイスを物理的に取られた場合や、同じユーザー権限で動くプロセスからは守らない。
+- **鍵の保護**：ホストの `~/.cardbuddy/key` と、デバイスの `/flash/cardbuddy.key`・`/flash/cardbuddy_wifi.json`（Wi-Fi のパスワード）は平文で保存する。録音中の音声も、送り終えるまでデバイスの `/flash/cardbuddy_voice.tmp` に平文で置く（送り終えたら消すが、flash 上の消去済み領域から読み出せる可能性は残る）。デバイスを物理的に取られた場合や、同じユーザー権限で動くプロセスからは守らない。
 - **Unix socket**（`~/.cardbuddy/buddyd.sock`、0600）：同じユーザーのプロセスは信頼する。

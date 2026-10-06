@@ -134,7 +134,8 @@ def status(args) -> int:
         return 1
     finally:
         conn.close()
-    print(f"device: {st['device'] or '-'} ({'connected' if st['connected'] else 'not connected'})")
+    state = f"connected over {st.get('transport')}" if st["connected"] else "not connected"
+    print(f"device: {st['device'] or '-'} ({state})")
     for s in st["sessions"]:
         print(f"  #{s['n'] or '-'}  {s['state']:<8} {s['sid']}")
     return 0

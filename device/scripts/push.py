@@ -42,6 +42,7 @@ except ImportError:
 # "no such file or directory".
 DEFAULT_FILES = [
     "main.py",
+    "launcher.py",
     "buddy_ble.py",
     "buddy_ui_cp.py",
     "buddy_state.py",
@@ -50,8 +51,9 @@ DEFAULT_FILES = [
     "crypto.py",
     "kana.py",
     "voice.py",
+    "wifi_link.py",
+    "buddy_app.py",
     "burst_frames.py",
-    "wifi_event.py",
     "apps/claude_buddy.py",
     "apps/hello_cardputer.py",
     "apps/snake.py",

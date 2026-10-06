@@ -115,4 +115,4 @@ mod が `prompt` を投入したあとに呼ぶ。
 ## 状態確認
 
 ### `GET /status`
-→ `200 {"connected": true, "device": "Claude_ab12cd", "sessions": [{"n": 1, "sid": "...", "state": "idle"}]}`
+→ `200 {"connected": true, "transport": "ble", "device": "Claude_ab12cd", "sessions": [{"n": 1, "sid": "...", "state": "idle"}]}`

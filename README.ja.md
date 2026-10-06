@@ -4,7 +4,7 @@
 
 ![デモ: Cardputer から権限の承認、AskUserQuestion への回答、かなでのプロンプト送信を行う様子](docs/demo.gif)
 
-M5Stack Cardputer-Adv から、BLE 経由で複数の Claude Code CLI セッションを操作する。
+M5Stack Cardputer-Adv から、Wi-Fi か BLE 経由で複数の Claude Code CLI セッションを操作する。
 
 - 権限ダイアログに allow / deny で答える（allow は全文を表示できたときだけ）
 - AskUserQuestion に答える
@@ -12,6 +12,7 @@ M5Stack Cardputer-Adv から、BLE 経由で複数の Claude Code CLI セッシ�
 - セッションログを読む
 - かなで入力する（Tab で 英数 / ひらがな / カタカナ を切り替える）
 - 内蔵マイクで、日本語か英語のプロンプトを音声入力する（文字起こしは Mac 上でオンデバイスで行う）
+- ヘッダにバッテリー残量（充電中かどうかも）を表示する
 
 ## 構成
 
@@ -25,13 +26,13 @@ flowchart LR
   dev["Cardputer-Adv<br>device/"]
   cc1 -- "HTTP over Unix socket<br>~/.cardbuddy/buddyd.sock" --> d
   cc2 -- "HTTP over Unix socket" --> d
-  d <-- "BLE（NUS）<br>AES-128-CTR + HMAC-SHA256" --> dev
+  d <-- "Wi-Fi（TCP）か BLE（NUS）<br>AES-128-CTR + HMAC-SHA256" --> dev
 ```
 
 | ディレクトリ | 役割 |
 | --- | --- |
 | `mod/` | Claude Code の plugin。function hooks がセッションの登録、AskUserQuestion の中継、プロンプトの投入、セッションログの送信を行う。同梱の `PermissionRequest` コマンド hook が、端末のダイアログと並行してデバイスの回答を待つ。 |
-| `daemon/` | buddyd（Python、bleak）。Unix socket `~/.cardbuddy/buddyd.sock` で mod と話し、BLE でデバイスとつなぐ。CLI `buddy`（`pair` / `status` / `install-agent`）を含む。 |
+| `daemon/` | buddyd（Python、bleak）。Unix socket `~/.cardbuddy/buddyd.sock` で mod と話し、Wi-Fi（TCP）か BLE でデバイスとつなぐ。CLI `buddy`（`pair` / `status` / `install-agent`）を含む。 |
 | `device/` | Cardputer-Adv 用の MicroPython アプリ。[moremas/build-with-claude](https://github.com/moremas/build-with-claude) の buddy（Apache-2.0）を改変したもの。 |
 | `PROTOCOL.md` | buddyd とデバイスの間の通信仕様と脅威モデル。 |
 | `docs/daemon-api.md` | mod と buddyd の間の HTTP API。 |
@@ -84,6 +85,7 @@ uv --directory daemon run buddy pair --port /dev/cu.usbmodemXXXX
 - 32 byte の鍵を作り、ホストの `~/.cardbuddy/key`（0600）と、デバイスの `/flash/cardbuddy.key` に USB 経由で書き込む。鍵は BLE には流さない。
 - デバイスの広告名（`Claude_` + BT MAC の下位 6 桁）を `~/.cardbuddy/device` に保存する。buddyd はこの名前に完全一致で接続する。
 - 既存の鍵があればそれを使う。作り直すときは `--rotate` を付ける。
+- Wi-Fi を使う場合は `--wifi` を付ける。SSID とパスワード（入力は表示しない）を尋ね、デバイスの `/flash/cardbuddy_wifi.json` に平文で書き込む。
 - 書き込んだら、デバイスをリセットして鍵を読み込ませる。
 
 ### 4. buddyd を起動する
@@ -105,6 +107,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sohsatoh.cardbuddy.b
 - 状態は `uv --directory daemon run buddy status` で確認できる。
 - 鍵を作り直したときは、buddyd を再起動する（`launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd`）。
 - 初回は、macOS が Bluetooth の利用許可を求めることがある。
+
+Wi-Fi について：
+
+- buddyd は全インターフェースの TCP 47823 で待ち受け、2 秒ごとに UDP のビーコン（`cardbuddy/1 <ポート>`）を 47824 へブロードキャストする。デバイスはビーコンで Mac を見つけて接続するので、Mac とデバイスは同じネットワークセグメントにいる必要がある。
+- macOS のアプリケーションファイアウォールが有効な場合、初回に buddyd（Python）への受信接続を許可するか尋ねられる。許可しないと、デバイスは Wi-Fi で接続できない。
+- Wi-Fi を優先する。Wi-Fi のセッションがある間、buddyd は BLE を探さず、BLE の接続は切る。Wi-Fi のセッションが切れたら、自動で BLE に戻る。どちらでつながっているかは `buddy status` で確認できる。
+- ポートは `buddyd --tcp-port <ポート>` で変えられる。BLE だけで使う場合は `buddyd --no-wifi` で起動する（launchd で使う場合は、LaunchAgent の plist の `ProgramArguments` に足す）。
 
 ### 5. Claude Code に mod を読み込ませる
 
@@ -186,13 +195,14 @@ Cardputer-Adv の矢印キーは、単体で押すと `;` `,` `.` `/` の文字�
 
 詳細と脅威モデルは [PROTOCOL.md](PROTOCOL.md) を参照。要点は次のとおり。
 
-- BLE の上に、アプリ層の暗号化を重ねる。AES-128-CTR と HMAC-SHA256（Encrypt-then-MAC）を使い、接続ごとに HKDF-SHA256 でセッション鍵を導出する。過去の接続で録ったフレームを再送しても、MAC の検証で落ちる。
-- 共有鍵は USB 経由で書き込み、BLE には流さない。
+- BLE と TCP の上に、アプリ層の暗号化を重ねる。AES-128-CTR と HMAC-SHA256（Encrypt-then-MAC）を使い、接続ごとに HKDF-SHA256 でセッション鍵を導出する。過去の接続で録ったフレームを再送しても、MAC の検証で落ちる。
+- 共有鍵は USB 経由で書き込み、BLE にも Wi-Fi にも流さない。
+- Hello の交換で、両者が鍵を持っていることを確かめる。LAN 上の第三者が buddyd の TCP ポートにつないだ場合や、偽のビーコンでデバイスを誘導した場合も、セッションは確立できない。
 - デバイスは、perm の全文を表示できたときだけ allow を送る。
 - 次のものは守らない。
-  - DoS（第三者の central が先につなぐ、電波妨害など）
+  - DoS（第三者の central が先につなぐ、電波妨害、偽のビーコン、TCP ポートへの大量接続など。確立前の TCP 接続は 4 本まで、それぞれ 5 秒で切る）
   - トラフィック解析
-  - 鍵の保護（ホストとデバイスに平文で保存する）
+  - 鍵の保護（鍵と Wi-Fi のパスワードは、ホストとデバイスに平文で保存する）
   - 同じユーザー権限で動くプロセス（Unix socket は 0600 で、同じユーザーは信頼する）
 
 ## テスト
@@ -217,7 +227,6 @@ claude plugin test mod
 - buddyd がデバイスとつながっていないときや、セッションに番号が無いときは、権限ダイアログは端末だけに出る。
 - 漢字変換はできない。
 - UIFlow2 は v2.4.2 に固定する（「ファームウェアを書き込む」を参照）。
-- ランチャーは起動時に、upstream から引き継いだ `device/wifi_event.py` の Wi-Fi（SSID `cardputer`）への接続を試みる。不要なら、このファイルの SSID とパスワードを書き換えるか、デバイスから削除する。
 
 ## ライセンス
 

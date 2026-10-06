@@ -21,9 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import push  # noqa: E402
 
 DEVICE = Path(__file__).resolve().parent.parent
-COMPILED = ["crypto.py", "buddy_protocol.py", "buddy_ble.py", "buddy_ui_cp.py", "kana.py", "voice.py"]
+COMPILED = [
+    "crypto.py", "buddy_protocol.py", "buddy_ble.py", "buddy_ui_cp.py", "kana.py", "voice.py", "wifi_link.py",
+    "buddy_app.py", "launcher.py", "burst_frames.py",
+]
+# 以前の版が入れていたが、今は使わないファイル（起動時の自動接続が Wi-Fi の接続を妨げるため消す）
+OBSOLETE = ["wifi_event.py"]
 # viper を含むファイルは、アーキテクチャを指定しないと mpy-cross が "invalid arch" で失敗する
-NATIVE = {"voice.py": "xtensawin"}  # ESP32-S3
+NATIVE = {"voice.py": "xtensawin", "crypto.py": "xtensawin"}  # ESP32-S3
 PLAIN = [f for f in push.DEFAULT_FILES if f not in COMPILED]
 
 RM_CODE = """import uos
@@ -86,7 +91,7 @@ def deploy(port: str, mpys: list[Path]) -> None:
             print(f"uploading {name}...")
             push._upload_file(s, str(DEVICE / name), name)
 
-        run(s, RM_CODE.format(names=COMPILED), "RM-OK")
+        run(s, RM_CODE.format(names=COMPILED + OBSOLETE), "RM-OK")
         run(s, NVS_CODE, "NVS-OK")
         print("rebooting device (re-plug USB if the port does not come back)...")
         push._paste(s, "import machine; machine.reset()\n", settle=0.5)

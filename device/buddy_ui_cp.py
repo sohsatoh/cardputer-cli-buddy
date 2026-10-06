@@ -49,6 +49,8 @@ _MAX_TEXT = 500
 _SETTLE_MS = 400
 _SCROLL = 3
 _STATUS_MS = 5000
+BATTERY_MS = 20000  # 電池残量を読む間隔
+BATTERY_LOW = 20  # これ以下は赤で出す
 _MAX_PAGES = 4  # ログの保持ページ数（空きメモリ約 67KB に収めるため）
 
 ENTER, ESC, BS = "ENTER", "ESC", "BS"
@@ -147,6 +149,18 @@ def _right(s, y, color, bg=BLACK):
     _text(s, _W - _PAD - _LCD.textWidth(s), y, color, bg)
 
 
+def _read_battery():
+    """(残量 %, 充電中か) を返す。取れないか範囲外なら None。"""
+    try:
+        p = M5.Power
+        level = p.getBatteryLevel()
+        if not isinstance(level, int) or not 0 <= level <= 100:
+            return None
+        return level, p.isCharging() is True
+    except Exception:
+        return None
+
+
 def _str(v):
     return v if isinstance(v, str) else str(v)
 
@@ -175,6 +189,8 @@ class BuddyUI:
         self.lang = _LANGS[0]
         self._vmsg = ("", GRAY_MID)  # 音声入力画面に出す結果やエラー
         self._vshown = None
+        self._bat = None
+        self._bat_ms = None
         self._in_ms = None
         self.conn = "advertising"
         self.mode = "list"  # list / log / input / voice（perm / ask は queue の先頭から決まる）
@@ -284,10 +300,11 @@ class BuddyUI:
             self._dirty = True
         elif st == "lost":
             v.done()
-            self._vmsg = ("切断されたため取り消しました", RED)
+            self._vmsg = (v.err or "取り消しました", RED)
             self._dirty = True
         if self.mode == "voice":
-            shown = (v.state, v.elapsed_ms, v.level >> 10)
+            # 録音中の描き直しは 1 回 40ms ほどかかり、送信と取り合うので 0.5 秒単位に間引く（実機で測定）
+            shown = (v.state, v.elapsed_ms // 500, v.level >> 12, v.progress // 10 if v.state == "flush" else 0)
             if shown != self._vshown:
                 self._vshown = shown
                 self._dirty = True
@@ -449,7 +466,7 @@ class BuddyUI:
             elif st == "idle":
                 self._vmsg = ("", GRAY_MID)
                 if not v.start(self.lang):
-                    self._vmsg = ("開始できません（未接続）", RED)
+                    self._vmsg = (v.err or "開始できません", RED)
 
     def _key_input(self, key):
         if key in (TAB, ENTER, LEFT, RIGHT, UP, DOWN):
@@ -537,7 +554,18 @@ class BuddyUI:
 
     # ----- drawing
 
+    def _poll_battery(self):
+        now = time.ticks_ms()
+        if self._bat_ms is not None and time.ticks_diff(now, self._bat_ms) < BATTERY_MS:
+            return
+        self._bat_ms = now
+        bat = _read_battery()
+        if bat != self._bat:
+            self._bat = bat
+            self._dirty = True
+
     def refresh(self):
+        self._poll_battery()
         self._sync()
         if self.p.rev != self._rev:
             self._rev = self.p.rev
@@ -571,7 +599,7 @@ class BuddyUI:
         if not self.p.paired:
             label, color = "NO KEY", RED
         elif self.p.ready:
-            label, color = "LINK", GREEN
+            label, color = getattr(self.p.link, "kind", "LINK"), GREEN
         elif self.conn == "connected":
             label, color = "HELLO..", YELLOW
         elif self.conn == "disconnected":
@@ -581,9 +609,18 @@ class BuddyUI:
         n = len(self.p.queue)
         if n:
             label = "{}件待ち {}".format(n, label)
+        right = _W - _PAD
+        if self._bat is not None:
+            level, charging = self._bat
+            # 充電中の印は ⚡ が EFontJA24 で出るか確かめられないので、ASCII の + にする
+            bat = ("+" if charging else "") + "{}%".format(level)
+            right -= _LCD.textWidth(bat)
+            _text(bat, right, 0, RED if level <= BATTERY_LOW else GRAY_MID, DARK)
+            right -= _PAD
+        right -= _LCD.textWidth(label)
+        _text(label, right, 0, color, DARK)
         left, lc = self.status if self.status[0] else ("CLI Buddy", ORANGE)
-        _text(_fit(left, _TW - _LCD.textWidth(label) - _PAD), _PAD, 0, lc, DARK)
-        _right(label, 0, color, DARK)
+        _text(_fit(left, right - _PAD - _PAD), _PAD, 0, lc, DARK)
 
     def _draw_unpaired(self):
         _text("未ペアリング", _PAD, _row(0), RED)
@@ -622,14 +659,15 @@ class BuddyUI:
         _right(self.lang, _row(0), GRAY_MID)
         st = v.state
         if st == "rec":
-            _text("● 録音中 {}.{} 秒".format(v.elapsed_ms // 1000, v.elapsed_ms // 100 % 10), _PAD, _row(1), RED)
+            _text("● 録音中 {} 秒".format(v.elapsed_ms // 1000), _PAD, _row(1), RED)
             y = _row(2) + 4
             _LCD.fillRect(_PAD, y, _TW, 8, DARK)
             _LCD.fillRect(_PAD, y, min(_TW, v.level * _TW // 12000), 8, GREEN)
-            if v.dropped:
-                _text("送信が遅れ {} 件を捨てました".format(v.dropped), _PAD, _row(4), YELLOW)
             return "Ent:停止 Esc:取消"
-        if st in ("flush", "wait"):
+        if st == "flush":
+            _text("送信中 {}%".format(v.progress), _PAD, _row(1), CYAN)
+            return "Esc:取消"
+        if st == "wait":
             _text("認識中…", _PAD, _row(1), CYAN)
             return "Esc:取消"
         _text("Enter で録音を始めます", _PAD, _row(1), CREAM)

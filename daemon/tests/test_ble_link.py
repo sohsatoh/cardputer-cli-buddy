@@ -45,7 +45,8 @@ class Device:
     async def handshake(self):
         self.nh = crypto.parse_hello(await self.conn.to_dev.get(), crypto.ROLE_HOST)
         nd = os.urandom(16)
-        await self.conn.to_host.put(crypto.hello(crypto.ROLE_DEVICE, nd))
+        await self.conn.to_host.put(crypto.hello_device(self.key, self.nh, nd))
+        crypto.check_hello_ack(await asyncio.wait_for(self.conn.to_dev.get(), 2), self.key, self.nh, nd)
         self.s = crypto.Session(*crypto.hkdf(self.key, self.nh, nd), crypto.DIR_D2H)
 
     async def recv(self):
@@ -138,23 +139,29 @@ async def test_rejects_tampered_replayed_and_plaintext_frames(caplog):
     task.cancel()
 
 
-@aio
-async def test_garbage_before_hello_is_ignored(caplog):
-    caplog.set_level(logging.WARNING, logger="cardbuddy.ble_link")
-    hub = Hub()
-    link = Link(KEY, hub)
-    hub.link = link
+async def bad_hello(make_line):
+    link = Link(KEY, Hub())
+    link.hub.link = link
     conn = FakeConn()
     task = asyncio.create_task(link.serve(conn))
     nh = crypto.parse_hello(await conn.to_dev.get(), crypto.ROLE_HOST)
-    await conn.to_host.put(b"junk\n")
-    await conn.to_host.put(crypto.hello(crypto.ROLE_HOST, nh))
-    nd = os.urandom(16)
-    await conn.to_host.put(crypto.hello(crypto.ROLE_DEVICE, nd))
-    dev = crypto.Session(*crypto.hkdf(KEY, nh, nd), crypto.DIR_D2H)
-    assert dev.open(await asyncio.wait_for(conn.to_dev.get(), 2))["t"] == "sessions"
-    assert sum("drop hello" in r.getMessage() for r in caplog.records) == 2
-    task.cancel()
+    await conn.to_host.put(make_line(nh))
+    assert await asyncio.wait_for(task, 2) is False
+    assert conn.to_dev.empty() and not link.connected
+
+
+@pytest.mark.parametrize("why,make_line", [
+    ("bad hello tag", lambda nh: crypto.hello_device(bytes(32), nh, os.urandom(16))),
+    ("bad hello tag", lambda nh: crypto.hello_device(KEY, os.urandom(16), os.urandom(16))),
+    ("bad hello tag", lambda nh: crypto.hello_device(KEY, nh, os.urandom(16))[:-6] + b"AAAA=\n"),
+    ("bad hello", lambda nh: crypto.hello(crypto.ROLE_DEVICE, os.urandom(16))),
+    ("bad base64", lambda nh: b"junk!\n"),
+])
+@aio
+async def test_bad_hello_disconnects(caplog, why, make_line):
+    caplog.set_level(logging.WARNING, logger="cardbuddy.ble_link")
+    await bad_hello(make_line)
+    assert any(f"hello failed ({why})" in r.getMessage() for r in caplog.records), caplog.text
 
 
 @aio
@@ -296,8 +303,9 @@ async def test_connect_uses_advertised_name(monkeypatch, cached, adv, want, ok):
         async def start_notify(self, uuid, cb):
             pass
 
-    async def serve(self, conn):
-        seen["device"] = self.device
+    async def serve(self, conn, transport, device):
+        seen["device"] = device
+        assert transport == "ble"
         return True
 
     monkeypatch.setattr(ble_link.BleakScanner, "find_device_by_filter", find)
@@ -321,3 +329,85 @@ async def test_audio_frames_reach_recorder_and_disconnect_cancels():
     await conn.to_host.put(None)
     assert await asyncio.wait_for(task, 2) is True
     assert hub.voice.vid is None
+
+
+@aio
+async def test_ping_and_idle_timeout(monkeypatch):
+    monkeypatch.setattr(ble_link, "PING_INTERVAL", 0.05)
+    monkeypatch.setattr(ble_link, "IDLE_TIMEOUT", 0.3)
+    hub, link, conn, dev, task = await start()
+    await dev.recv()
+    assert await dev.recv() == {"t": "ping"}
+    for _ in range(12):
+        await dev.send_line(dev.s.seal({"t": "pong"}))
+        await asyncio.sleep(0.05)
+    assert not task.done() and link.connected
+    assert await asyncio.wait_for(task, 2) is True
+    assert not link.connected and link.transport is None
+
+
+@aio
+async def test_pong_is_not_passed_to_hub(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING)
+    hub, link, conn, dev, task = await start()
+    await dev.recv()
+    await dev.send_line(dev.s.seal({"t": "pong"}))
+    await asyncio.sleep(0.05)
+    assert "unknown t" not in caplog.text
+    task.cancel()
+
+
+async def establish(link, transport):
+    conn = FakeConn()
+    dev = Device(conn)
+    task = asyncio.create_task(link.serve(conn, transport, f"dev-{transport}"))
+    await dev.handshake()
+    await dev.recv()
+    return conn, dev, task
+
+
+@aio
+async def test_tcp_session_replaces_ble_and_ble_never_replaces_tcp():
+    hub = Hub()
+    link = hub.link = Link(KEY, hub)
+    ups = []
+    hub.on_up = lambda: (ups.append(link.transport), Hub.on_up(hub))
+    _, _, ble = await establish(link, "ble")
+    assert (link.transport, link.device) == ("ble", "dev-ble")
+    _, _, tcp = await establish(link, "tcp")
+    assert await asyncio.wait_for(ble, 2) is True
+    assert (link.transport, link.device) == ("tcp", "dev-tcp") and link.connected
+    conn = FakeConn()
+    dev = Device(conn)
+    late = asyncio.create_task(link.serve(conn, "ble", "dev-ble2"))
+    await dev.handshake()
+    assert await asyncio.wait_for(late, 2) is False
+    assert link.transport == "tcp" and not tcp.done()
+    _, _, tcp2 = await establish(link, "tcp")
+    assert await asyncio.wait_for(tcp, 2) is True
+    assert ups == ["ble", "tcp", "tcp"]
+    tcp2.cancel()
+
+
+@aio
+async def test_ble_is_not_searched_while_tcp_is_up(monkeypatch):
+    calls = []
+
+    async def once(self, name):
+        calls.append(self.transport)
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(Link, "_connect_once", once)
+    hub = Hub()
+    link = hub.link = Link(KEY, hub)
+    runner = asyncio.create_task(link.run(None))
+    await asyncio.sleep(0.05)
+    assert calls == [None]
+    conn, _, tcp = await establish(link, "tcp")
+    await asyncio.sleep(0.1)
+    assert calls == [None]
+    await conn.to_host.put(None)
+    await asyncio.wait_for(tcp, 2)
+    await asyncio.sleep(0.05)
+    assert calls == [None, None]
+    runner.cancel()

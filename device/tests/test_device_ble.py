@@ -31,7 +31,11 @@ class FakeBLE:
         self.handler = h
 
     def gap_advertise(self, *a, **kw):
-        pass
+        self.adv = getattr(self, "adv", [])
+        self.adv.append(a[0] if a else None)
+
+    def gap_disconnect(self, conn):
+        self.disconnected = getattr(self, "disconnected", 0) + 1
 
     def gatts_set_buffer(self, *a):
         pass
@@ -56,7 +60,8 @@ class FakeBLE:
 def ble(monkeypatch):
     fake = FakeBLE()
     monkeypatch.setitem(sys.modules, "bluetooth", types.SimpleNamespace(UUID=lambda s: s.encode(), BLE=lambda: fake))
-    monkeypatch.setitem(sys.modules, "micropython", types.SimpleNamespace(const=lambda x: x, schedule=lambda f, a: None))
+    scheduled = []
+    monkeypatch.setitem(sys.modules, "micropython", types.SimpleNamespace(const=lambda x: x, schedule=lambda f, a: scheduled.append(f)))
     monkeypatch.setattr(time, "sleep_ms", lambda ms: None, raising=False)
     monkeypatch.setattr(time, "ticks_ms", lambda: 0, raising=False)
     monkeypatch.setattr(time, "ticks_diff", lambda a, b: a - b, raising=False)
@@ -67,6 +72,7 @@ def ble(monkeypatch):
     link = buddy_ble.BuddyBLE(on_line=lines.append)
     fake.handler(1, (0, 0, b""))  # connect
     fake.link = link
+    fake.scheduled = scheduled
     return fake, lines
 
 
@@ -163,3 +169,23 @@ def test_send_line_keeps_line_queued_after_timeout(ble, monkeypatch):
     fake.fail = []
     assert link.pump() is True
     assert b"".join(fake.sent) == b"q" * 30 + b"\n"
+
+
+def test_pause_stops_advertising_and_resume_restarts(ble):
+    fake, _ = ble
+    link = fake.link
+    fake.adv.clear()
+    link.pause()
+    assert link.paused and fake.adv == [None] and fake.disconnected == 1
+    fake.handler(2, (0, 0, b""))  # 止めている間の切断では、広告を再開しない
+    assert fake.scheduled == []
+    fake.adv.clear()
+    link._rearm_adv(0)  # 一時停止の前に予約された再開が後から走っても、広告しない
+    assert fake.adv == []
+    fake.adv.clear()
+    link.resume()
+    assert not link.paused and fake.adv[-1] is not None  # 広告を再開
+    link.pause()
+    fake.handler(1, (0, 0, b""))
+    link.hello_failed()  # 鍵の確認に失敗した BLE の相手は切る
+    assert fake.disconnected == 2

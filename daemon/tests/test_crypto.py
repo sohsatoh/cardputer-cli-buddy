@@ -19,7 +19,14 @@ def test_hkdf_matches_rfc5869_impl():
 
 def test_hello():
     assert c.parse_hello(V["hello_host"].encode(), c.ROLE_HOST) == NH
-    assert c.parse_hello(V["hello_device"].encode(), c.ROLE_DEVICE) == ND
+    assert c.parse_hello_device(V["hello_device"].encode(), KEY, NH) == ND
+    c.check_hello_ack(V["hello_ack"].encode(), KEY, NH, ND)
+    with pytest.raises(c.FrameError):
+        c.parse_hello_device(V["hello_device"].encode(), bytes(32), NH)  # 鍵を持たない相手
+    with pytest.raises(c.FrameError):
+        c.parse_hello_device(V["hello_device"].encode(), KEY, bytes(16))  # 別の nh への応答
+    with pytest.raises(c.FrameError):
+        c.check_hello_ack(V["hello_ack"].encode(), bytes(32), NH, ND)
     with pytest.raises(c.FrameError):
         c.parse_hello(V["hello_host"].encode(), c.ROLE_DEVICE)
 

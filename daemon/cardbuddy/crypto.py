@@ -14,6 +14,7 @@ DATA = 0x44  # 'D'
 AUDIO = 0x41  # 'A'
 ROLE_HOST = 0x68  # 'h'
 ROLE_DEVICE = 0x64  # 'd'
+ROLE_ACK = 0x6B  # 'k'
 DIR_H2D = 0x01
 DIR_D2H = 0x02
 INFO = b"cardbuddy v1"
@@ -43,6 +44,37 @@ def parse_hello(line: bytes, want_role: int) -> bytes:
     if len(raw) != 19 or raw[0] != VER or raw[1] != HELLO or raw[2] != want_role:
         raise FrameError("bad hello")
     return raw[3:]
+
+
+def hello_tag(key: bytes, label: bytes, nh: bytes, nd: bytes) -> bytes:
+    return hmac.new(key, b"cardbuddy v1 hello " + label + nh + nd, hashlib.sha256).digest()[:16]
+
+
+def hello_device(key: bytes, nh: bytes, nd: bytes) -> bytes:
+    return base64.b64encode(bytes([VER, HELLO, ROLE_DEVICE]) + nd + hello_tag(key, b"d", nh, nd)) + b"\n"
+
+
+def parse_hello_device(line: bytes, key: bytes, nh: bytes) -> bytes:
+    """Hello(d) の tag_d を検証して nd を返す。"""
+    raw = _b64(line)
+    if len(raw) != 35 or raw[0] != VER or raw[1] != HELLO or raw[2] != ROLE_DEVICE:
+        raise FrameError("bad hello")
+    nd = raw[3:19]
+    if not hmac.compare_digest(raw[19:], hello_tag(key, b"d", nh, nd)):
+        raise FrameError("bad hello tag")
+    return nd
+
+
+def hello_ack(key: bytes, nh: bytes, nd: bytes) -> bytes:
+    return base64.b64encode(bytes([VER, HELLO, ROLE_ACK]) + hello_tag(key, b"h", nh, nd)) + b"\n"
+
+
+def check_hello_ack(line: bytes, key: bytes, nh: bytes, nd: bytes) -> None:
+    raw = _b64(line)
+    if len(raw) != 19 or raw[0] != VER or raw[1] != HELLO or raw[2] != ROLE_ACK:
+        raise FrameError("bad hello ack")
+    if not hmac.compare_digest(raw[3:], hello_tag(key, b"h", nh, nd)):
+        raise FrameError("bad hello ack tag")
 
 
 def _b64(line: bytes) -> bytes:

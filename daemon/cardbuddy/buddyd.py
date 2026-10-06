@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import http_api, voice
+from . import http_api, voice, wifi
 from .ble_link import Link
 from .session_table import PROMPT_MAX, SessionTable, trunc
 
@@ -191,7 +191,7 @@ def resolve_name(name: str | None) -> str | None:
         return None
 
 
-async def _amain(key: bytes, name: str | None):
+async def _amain(key: bytes, name: str | None, tcp_port: int | None = None):
     h = home()
     h.mkdir(mode=0o700, parents=True, exist_ok=True)
     # 文字起こし中に SIGKILL やクラッシュで落ちると finally が走らず WAV が残る
@@ -206,14 +206,25 @@ async def _amain(key: bytes, name: str | None):
     sock = h / "buddyd.sock"
     server = await http_api.serve(hub, str(sock))
     log.info("listening on %s", sock)
+    tasks = [link.run(name), hub.sessions_loop(), hub.expire_loop()]
+    if tcp_port is not None:
+        try:
+            await wifi.serve_tcp(link, "0.0.0.0", tcp_port)
+        except OSError as e:
+            log.error("wifi disabled: cannot listen on tcp port %d (%s)", tcp_port, e)
+        else:
+            log.info("listening on tcp 0.0.0.0:%d, beaconing on udp %d", tcp_port, wifi.BEACON_PORT)
+            tasks.append(wifi.beacon_loop(tcp_port))
     async with server:
-        await asyncio.gather(link.run(name), hub.sessions_loop(), hub.expire_loop())
+        await asyncio.gather(*tasks)
 
 
 def main():
     ap = argparse.ArgumentParser(prog="buddyd")
     ap.add_argument("--name", help="exact advertised name of the device "
                     "(default: the name saved by `buddy pair`, else any Claude_*)")
+    ap.add_argument("--tcp-port", type=int, default=wifi.TCP_PORT, help="TCP port for Wi-Fi (default: %(default)s)")
+    ap.add_argument("--no-wifi", action="store_true", help="BLE only: do not listen on TCP or send beacons")
     args = ap.parse_args()
     logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -221,6 +232,6 @@ def main():
     name = resolve_name(args.name)
     log.info("looking for %s", name or "any Claude_* device")
     try:
-        asyncio.run(_amain(key, name))
+        asyncio.run(_amain(key, name, None if args.no_wifi else args.tcp_port))
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass

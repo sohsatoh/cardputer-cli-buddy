@@ -20,23 +20,47 @@ class FakeLcd:
     def __init__(self):
         self.drawn = []
         self.pos = []
+        self.colors = {}
+        self.color = None
 
     def textWidth(self, s):
-        return sum(13 if ord(c) > 0x7E else 7 for c in s)  # 0.5 倍の実測（6 / 11）を 0.6 倍にした値
+        return sum(14 if ord(c) > 0x7E else 7 for c in s)  # EFontJA24 × 0.6 の実測（「9件待ち」= 49px）
+
+    def setTextColor(self, fg, bg=None):
+        self.color = fg
 
     def drawString(self, s, x, y):
         self.drawn.append(s)
         self.pos.append((s, x, y))
+        self.colors[s] = self.color
 
     def __getattr__(self, name):
         return lambda *a, **kw: None
 
 
+class FakePower:
+    def __init__(self):
+        self.level = 87
+        self.charging = False
+        self.calls = 0
+        self.fail = False
+
+    def getBatteryLevel(self):
+        self.calls += 1
+        if self.fail:
+            raise OSError(5)
+        return self.level
+
+    def isCharging(self):
+        return self.charging
+
+
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     clock = [0]
     log = []
-    monkeypatch.setitem(sys.modules, "M5", types.SimpleNamespace(Lcd=FakeLcd(), Mic=FakeMic(log), Speaker=FakeSpeaker(log)))
+    power = FakePower()
+    monkeypatch.setitem(sys.modules, "M5", types.SimpleNamespace(Lcd=FakeLcd(), Mic=FakeMic(log), Speaker=FakeSpeaker(log), Power=power))
     monkeypatch.setattr(time, "sleep_ms", lambda ms: None, raising=False)
     monkeypatch.setattr(time, "ticks_ms", lambda: clock[0], raising=False)
     monkeypatch.setattr(time, "ticks_diff", lambda a, b: a - b, raising=False)
@@ -44,6 +68,8 @@ def env(monkeypatch):
     monkeypatch.delitem(sys.modules, "voice", raising=False)
     import buddy_ui_cp
     import voice
+
+    monkeypatch.setattr(voice, "SPOOL", str(tmp_path / "voice.tmp"))
 
     d = Dev()
     d.handshake()
@@ -628,7 +654,7 @@ def test_voice_record_recognize_and_fill_input(env):
     mic.finish(value=4000)
     v.service(link)
     drawn = _redraw(ui)
-    assert any("録音中" in s for s in drawn) and any("0.1" in s for s in drawn)
+    assert any("録音中 0 秒" in s for s in drawn)
     keys(TAB)
     assert ui.lang == "ja-JP"  # 録音中は言語を変えない
     keys(ord(" "))
@@ -636,7 +662,9 @@ def test_voice_record_recognize_and_fill_input(env):
     mic.finish()
     mic.finish()
     v.service(link)
-    v.service(link)
+    assert v.state == "flush" and any("送信中" in s for s in _redraw(ui))
+    for _ in range(5):
+        v.service(link)
     assert d.replies() == [{"t": "voice_end", "vid": v.vid}] and v.state == "wait"
     assert "認識中…" in _redraw(ui)
     d.push({"t": "voice_text", "vid": "other", "text": "違う録音"})
@@ -660,7 +688,8 @@ def test_voice_error_is_shown_and_can_retry(env):
     keys(10, 10)
     mic.finish()
     mic.finish()
-    v.service(link)
+    for _ in range(5):
+        v.service(link)
     vid = v.vid
     d.replies()
     d.push({"t": "voice_error", "vid": vid, "err": "聞き取れませんでした"})
@@ -718,7 +747,8 @@ def _recognizing(env):
     keys(10, 10)
     mic.finish()
     mic.finish()
-    v.service(FakeLink())
+    for _ in range(5):
+        v.service(FakeLink())
     assert v.state == "wait"
     d.replies()
     return d, ui, keys, v
@@ -753,3 +783,145 @@ def test_perm_keys_do_not_leak_into_voice_text(env):
     assert d.replies() == [{"t": "perm_reply", "req": "p1", "decision": "allow"}]
     ui.refresh()
     assert ui.mode == "input" and ui.text == "本文"
+
+
+def test_header_shows_link_kind(env):
+    d, ui, keys, wait = env
+    from test_device_protocol import Link, _hello
+
+    assert "BLE" in _redraw(ui)
+    wifi = Link("Wi-Fi")
+    _, ack = _hello(d.p, wifi)
+    d.p.on_line(ack, wifi)
+    assert "Wi-Fi" in _redraw(ui)
+
+
+def test_voice_memory_error_is_shown(env, monkeypatch):
+    d, ui, keys, mic = _voice_ready(env)
+    import voice
+
+    def no_memory(n):
+        raise MemoryError
+
+    monkeypatch.setattr(voice, "bytearray", no_memory, raising=False)
+    ui.voice = voice.Voice(d.p)  # 起動時の確保に失敗した場合
+    keys(10)
+    assert ui.voice.state == "idle" and d.replies() == []
+    assert any("メモリ" in s for s in _redraw(ui))
+
+
+def test_voice_timeout_reason_is_shown(env):
+    d, ui, keys, mic = _voice_ready(env)
+    import voice
+
+    v = ui.voice
+    keys(10, 10)
+    mic.finish()
+    mic.finish()
+    for _ in range(5):
+        v.service(FakeLink())
+    assert v.state == "wait"
+    v._t_stop = time.ticks_ms() - voice.WAIT_MS - 1  # 停止から上限時間が過ぎた
+    v.service(FakeLink())
+    assert v.state == "lost"
+    assert any("時間内に認識できなかった" in s for s in _redraw(ui)) and v.state == "idle"
+
+
+def test_recording_screen_redraws_at_most_twice_a_second(env):
+    d, ui, keys, mic = _voice_ready(env)
+    v = ui.voice
+    link = FakeLink()
+    keys(10)
+    lcd = sys.modules["M5"].Lcd
+    ui.refresh()
+    draws = []
+    for _ in range(10):  # 1 秒分
+        mic.finish(value=1000)
+        v.service(link)
+        lcd.drawn.clear()
+        ui.refresh()
+        draws.append(bool(lcd.drawn))
+    # 描き直しは 1 回 40ms ほどかかり、録音中の送信と取り合う（実機で測定）
+    assert sum(draws) <= 2
+
+
+def _header(lcd):
+    return [(t, x) for t, x, y in lcd.pos if y == 0]
+
+
+def test_battery_is_shown_at_the_right_of_the_header(env):
+    d, ui, keys, wait = env
+    lcd = sys.modules["M5"].Lcd
+    drawn = _redraw(ui)
+    assert "87%" in drawn and lcd.colors["87%"] != buddy_ui_cp_mod().RED
+    t, x = [h for h in _header(lcd) if h[0] == "87%"][0]
+    assert x + lcd.textWidth(t) <= 240 - 6
+
+
+def test_battery_charging_and_low_colour(env):
+    d, ui, keys, wait = env
+    power, lcd = sys.modules["M5"].Power, sys.modules["M5"].Lcd
+    power.charging = True
+    power.level = 20
+    wait_battery(ui, env)
+    assert "+20%" in _redraw(ui) and lcd.colors["+20%"] == buddy_ui_cp_mod().RED
+    power.charging = False
+    power.level = 21
+    wait_battery(ui, env)
+    assert "21%" in _redraw(ui) and lcd.colors["21%"] != buddy_ui_cp_mod().RED
+
+
+def test_battery_is_polled_sparsely(env):
+    d, ui, keys, wait = env
+    power = sys.modules["M5"].Power
+    n = power.calls
+    for _ in range(50):
+        keys(ord(";"))  # 50ms ずつ、2.5 秒
+    assert power.calls == n
+    wait_battery(ui, env)
+    assert power.calls == n + 1
+
+
+def test_battery_failure_hides_it(env):
+    d, ui, keys, wait = env
+    power = sys.modules["M5"].Power
+    power.fail = True
+    wait_battery(ui, env)
+    assert not any(t.endswith("%") for t in _redraw(ui))
+    power.fail = False
+    power.level = 300  # 範囲外も出さない
+    wait_battery(ui, env)
+    assert not any(t.endswith("%") for t in _redraw(ui))
+
+
+def test_header_fits_with_everything(env):
+    d, ui, keys, wait = env
+    from test_device_protocol import Link, _hello
+
+    power, lcd = sys.modules["M5"].Power, sys.modules["M5"].Lcd
+    power.charging, power.level = True, 100
+    wifi = Link("Wi-Fi")
+    _, ack = _hello(d.p, wifi)
+    d.p.on_line(ack, wifi)
+    for i in range(9):
+        d.p.queue.append({"t": "perm", "n": 1, "req": "r%d" % i, "tool": "Bash", "hint": "ls", "full": True})
+    ui.status = ("#3 失敗（セッションが無い）とても長い状態の表示", 0)
+    wait_battery(ui, env)
+    lcd.pos.clear()
+    _redraw(ui)
+    head = sorted(_header(lcd), key=lambda h: h[1])
+    assert [t for t, _ in head][-2:] == ["9件待ち Wi-Fi", "+100%"]
+    end = 0
+    for t, x in head:
+        assert x >= end and x + lcd.textWidth(t) <= 240  # 重ならず、画面に収まる
+        end = x + lcd.textWidth(t)
+
+
+def buddy_ui_cp_mod():
+    return sys.modules["buddy_ui_cp"]
+
+
+def wait_battery(ui, env):
+    """前回の取得から、取得の間隔（BATTERY_MS）がちょうど過ぎたことにして描き直す。"""
+    ui._bat_ms = time.ticks_ms() - buddy_ui_cp_mod().BATTERY_MS
+    ui.refresh()

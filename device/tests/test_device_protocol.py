@@ -24,12 +24,13 @@ class Dev:
         self.p = bp.Protocol(key, self.sent.append)
         self.host = None
 
-    def handshake(self, nh=NH):
+    def handshake(self, nh=NH, key=KEY):
         self.sent.clear()
         self.p.on_line(host.hello(host.ROLE_HOST, nh).rstrip(b"\n"))
         assert len(self.sent) == 1
-        nd = host.parse_hello(self.sent.pop(), host.ROLE_DEVICE)
-        self.host = host.Session(*host.hkdf(KEY, nh, nd), host.DIR_H2D)
+        nd = host.parse_hello_device(self.sent.pop(), key, nh)
+        self.p.on_line(host.hello_ack(key, nh, nd).rstrip(b"\n"))
+        self.host = host.Session(*host.hkdf(key, nh, nd), host.DIR_H2D)
         return nd
 
     def push(self, msg):
@@ -50,12 +51,15 @@ def test_hello_reply_matches_vector(fixed_nd):
     d = Dev()
     d.p.on_line(V["hello_host"].encode())
     assert [s.decode().rstrip("\n") for s in d.sent] == [V["hello_device"]]
+    assert not d.p.ready  # Hello(k) で鍵を確かめるまでは確立しない
+    d.p.on_line(V["hello_ack"].encode())
     assert d.p.ready
 
 
 def test_vector_frames_then_rejects(fixed_nd):
     d = Dev()
     d.p.on_line(V["hello_host"].encode())
+    d.p.on_line(V["hello_ack"].encode())
     d.sent.clear()
     for f in H2D:
         d.p.on_line(f["line"].encode())
@@ -230,6 +234,7 @@ def test_reply_without_session_or_unknown_req():
 def test_overlong_line_dropped(fixed_nd):
     d = Dev()
     d.p.on_line(V["hello_host"].encode())
+    d.p.on_line(V["hello_ack"].encode())
     rev = d.p.rev
     d.p.on_line(b"A" * 4097)
     assert d.p.rev == rev and d.p.ready
@@ -279,3 +284,120 @@ def test_voice_results_dispatch():
     d.push({"t": "voice_text", "vid": "a", "text": "x"})
     d.handshake(nh=bytes(16))
     assert d.p.take_voice() is None
+
+
+class Link:
+    def __init__(self, kind="Wi-Fi"):
+        self.kind = kind
+        self.sent = []
+        self.failed = 0
+
+    def send_line(self, line):
+        self.sent.append(line)
+        return True
+
+    def hello_failed(self):
+        self.failed += 1
+
+
+def _hello(p, link, nh=NH, key=KEY):
+    p.on_line(host.hello(host.ROLE_HOST, nh).rstrip(b"\n"), link)
+    nd = host.parse_hello_device(link.sent.pop(), KEY, nh)
+    return nd, host.hello_ack(key, nh, nd).rstrip(b"\n")
+
+
+def test_data_before_hello_ack_dropped(fixed_nd):
+    d = Dev()
+    d.p.on_line(V["hello_host"].encode())
+    d.sent.clear()
+    d.p.on_line(H2D[1]["line"].encode())
+    assert d.p.queue == [] and not d.p.ready
+
+
+def test_wrong_key_or_other_nh_never_establishes():
+    d = Dev()
+    link = Link()
+    _, ack = _hello(d.p, link, key=bytes(32))
+    d.p.on_line(ack, link)
+    assert not d.p.ready and link.failed == 1
+    _, _ = _hello(d.p, link)
+    _, ack_other = _hello(Dev().p, Link(), nh=bytes(16))  # 別の nh の Hello(k)
+    d.p.on_line(ack_other, link)
+    assert not d.p.ready and link.failed == 2
+    d.p.on_line(V["hello_ack"].encode(), link)  # Hello(d) を待っていない状態の Hello(k)
+    assert not d.p.ready
+
+
+def test_hello_ack_timeout(monkeypatch):
+    clock = [0]
+    monkeypatch.setattr(bp, "ms", lambda: clock[0])
+    d = Dev()
+    link = Link()
+    _, ack = _hello(d.p, link)
+    clock[0] = 4900
+    d.p.tick()
+    assert link.failed == 0
+    clock[0] = 5100
+    d.p.tick()
+    assert link.failed == 1
+    d.p.on_line(ack, link)
+    assert not d.p.ready
+
+
+def test_failed_hello_on_other_link_keeps_current_session():
+    d = Dev()
+    d.handshake()
+    d.push({"t": "perm", "n": 1, "req": "r1", "tool": "Bash", "hint": "ls"})
+    wifi = Link()
+    _, ack = _hello(d.p, wifi, key=bytes(32))
+    assert d.p.ready and len(d.p.queue) == 1  # 鍵を持たない相手の Hello(h) では、今のセッションを捨てない
+    d.p.on_line(ack, wifi)
+    assert wifi.failed == 1 and d.p.ready and len(d.p.queue) == 1
+
+
+def test_session_moves_to_new_link_and_replies_follow():
+    d = Dev()
+    d.handshake()
+    wifi = Link()
+    nd, ack = _hello(d.p, wifi)
+    d.p.on_line(ack, wifi)
+    assert d.p.link is wifi and d.p.queue == []
+    rx = host.Session(*host.hkdf(KEY, NH, nd), host.DIR_H2D)
+    d.p.on_line(rx.seal({"t": "ping"}).rstrip(b"\n"), wifi)
+    assert [rx.open(x) for x in wifi.sent] == [{"t": "pong"}] and d.sent == []
+    d.p.on_line(d.host.seal({"t": "ping"}).rstrip(b"\n"))  # 古いリンクからの Data は捨てる
+    assert d.sent == []
+    d.p.on_disconnect()  # 古いリンクの切断では、新しいセッションを捨てない
+    assert d.p.ready
+    d.p.on_disconnect(wifi)
+    assert not d.p.ready and d.p.link is None
+
+
+def test_ping_pong():
+    d = Dev()
+    d.handshake()
+    d.push({"t": "ping"})
+    assert d.replies() == [{"t": "pong"}]
+
+
+def test_txqueue_caps_lines_but_never_drops_json(monkeypatch):
+    clock = [0]
+    monkeypatch.setattr(bp, "ms", lambda: clock[0])
+    monkeypatch.setattr(bp, "_sleep_ms", lambda n: clock.__setitem__(0, clock[0] + 100))
+    out = []
+    room = [0]
+
+    def write(mv):
+        if not room[0]:
+            return 0
+        out.append(bytes(mv))
+        return len(mv)
+
+    q = bp.TxQueue(write)
+    for i in range(bp.TX_MAX_LINES):
+        assert q.put(b"%d\n" % i)
+    assert q.put(b"x\n") is False  # 音声などは、詰まっている間は積まない
+    assert q.send(b"json\n")  # JSON は時間切れでもキューの後ろに残す
+    room[0] = 1
+    assert q.pump() is True
+    assert out == [b"%d\n" % i for i in range(bp.TX_MAX_LINES)] + [b"json\n"]

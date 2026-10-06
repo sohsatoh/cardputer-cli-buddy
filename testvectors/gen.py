@@ -65,7 +65,8 @@ def main():
         "enc_key": hx(enc),
         "mac_key": hx(mac),
         "hello_host": c.hello(c.ROLE_HOST, NH).decode().rstrip("\n"),
-        "hello_device": c.hello(c.ROLE_DEVICE, ND).decode().rstrip("\n"),
+        "hello_device": c.hello_device(KEY, NH, ND).decode().rstrip("\n"),
+        "hello_ack": c.hello_ack(KEY, NH, ND).decode().rstrip("\n"),
         "frames": frames,
         "audio_frames": audio,
         "reject_h2d": [

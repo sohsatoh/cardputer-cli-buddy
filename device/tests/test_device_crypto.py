@@ -37,7 +37,11 @@ def test_hmac_matches_stdlib():
 
 def test_hello():
     assert c.hello(c.ROLE_HOST, NH).decode().rstrip("\n") == V["hello_host"]
-    assert c.hello(c.ROLE_DEVICE, ND).decode().rstrip("\n") == V["hello_device"]
+    assert c.hello_device(KEY, NH, ND).decode().rstrip("\n") == V["hello_device"]
+    ack = c.decode_line(V["hello_ack"].encode())
+    assert ack[:3] == bytes([c.VER, c.HELLO, c.ROLE_ACK])
+    assert ack[3:] == c.hello_tag(KEY, b"h", NH, ND)
+    assert c.hello_tag(KEY, b"h", NH, ND) == host.hello_tag(KEY, b"h", NH, ND)
 
 
 def test_frames_seal_and_open():
@@ -117,3 +121,33 @@ def test_audio_frame_opens_on_host():
     line = dev.seal_bytes(pt, c.AUDIO)
     assert host.Session(enc, mac, c.DIR_H2D).open_frame(line) == (host.AUDIO, pt)
     assert ref.seal_bytes(pt, host.AUDIO) == line
+
+
+def test_seal_accepts_buffers_without_copy():
+    enc, mac = c.hkdf(KEY, NH, ND)
+    pt = bytes([0, 9]) + os.urandom(1600)
+    a = c.Session(enc, mac, c.DIR_D2H).seal_bytes(pt, c.AUDIO)
+    buf = bytearray(b"xx" + pt + b"yy")
+    b = c.Session(enc, mac, c.DIR_D2H).seal_bytes(memoryview(buf)[2:-2], c.AUDIO)
+    assert a == b and a.endswith(b"\n") and a.count(b"\n") == 1
+
+
+def test_hmac_pads_are_reused_per_session():
+    enc, mac = c.hkdf(KEY, NH, ND)
+    s = c.Session(enc, mac, c.DIR_D2H)
+    assert s._mac(b"abc") == c.hmac_sha256(mac, b"abc")
+    assert s._mac(memoryview(b"xabc")[1:]) == c.hmac_sha256(mac, b"abc")
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 3, 16, 17, 1602, 2048])
+def test_seal_into_matches_seal_bytes(n):
+    enc, mac = c.hkdf(KEY, NH, ND)
+    pt = os.urandom(n)
+    want = c.Session(enc, mac, c.DIR_D2H).seal_bytes(pt, c.AUDIO)
+    bufs = c.seal_buffers(n)
+    s = c.Session(enc, mac, c.DIR_D2H)
+    got = s.seal_into(memoryview(bytearray(pt)), c.AUDIO, bufs)
+    assert bytes(got) == want
+    ref = c.Session(enc, mac, c.DIR_D2H)
+    ref.seal_bytes(pt, c.AUDIO)
+    assert bytes(s.seal_into(pt, c.AUDIO, bufs)) == ref.seal_bytes(pt, c.AUDIO)  # バッファを使い回しても同じ

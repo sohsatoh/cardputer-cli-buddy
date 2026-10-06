@@ -150,6 +150,7 @@ def test_buddyd_exits_without_key(home):
 
 class FakeLink:
     connected = True
+    transport = "ble"
     device = "Claude_ab12cd"
 
     def send(self, msg):
@@ -258,7 +259,7 @@ async def run(self, name):
     await asyncio.Event().wait()
 
 buddyd.Link.run = run
-sys.argv = ["buddyd"]
+sys.argv = ["buddyd", "--no-wifi"]
 buddyd.main()
 """
 
