@@ -43,6 +43,7 @@ from micropython import const
 _IRQ_CENTRAL_CONNECT = const(1)
 _IRQ_CENTRAL_DISCONNECT = const(2)
 _IRQ_GATTS_WRITE = const(3)
+_IRQ_MTU_EXCHANGED = const(21)
 _IRQ_CONNECTION_UPDATE = const(27)
 _IRQ_ENCRYPTION_UPDATE = const(28)
 _IRQ_GET_SECRET = const(29)
@@ -55,6 +56,8 @@ _PASSKEY_ACTION_DISP = const(3)
 _PASSKEY_ACTION_NUMCMP = const(4)
 
 _MAX_LINE = const(4096)  # PROTOCOL.md の 1 行上限
+_ENOMEM = const(12)
+_NOTIFY_RETRY_MS = const(2000)
 
 _FLAG_READ = const(0x0002)
 _FLAG_WRITE_NR = const(0x0004)
@@ -242,6 +245,11 @@ class BuddyBLE:
         # dropping the event and (more importantly) leaving any future
         # access in this handler invocation undefined.
         self._conn = None
+        self._mtu = 23
+        # 送信は 1 本の FIFO に通す。音声と JSON の行が途中で混ざると host で両方壊れるため
+        self._txq = []
+        self._txo = 0
+        self._tx_reset = False
         self._encrypted = False
         self._rx_buf = bytearray()
         self._rx_skip = False
@@ -312,6 +320,9 @@ class BuddyBLE:
         if event == _IRQ_CENTRAL_CONNECT:
             conn, _addr_type, _addr = data
             self._conn = conn
+            self._mtu = 23
+            # IRQ はメインループの送信の途中に割り込むので、キューはここで触らず次の送信時に捨てる
+            self._tx_reset = True
             self._encrypted = False
             self._rx_buf = bytearray()
             self._rx_skip = False
@@ -340,6 +351,10 @@ class BuddyBLE:
                     self._advertise()
                 except OSError as e:
                     print("buddy_ble: inline re-advertise failed:", e)
+
+        elif event == _IRQ_MTU_EXCHANGED:
+            # macOS は接続直後に交換を始め、このビルドの既定 preferred MTU は 256
+            self._mtu = data[1]
 
         elif event == _IRQ_ENCRYPTION_UPDATE:
             # (conn_handle, encrypted, authenticated, bonded, key_size)
@@ -501,11 +516,11 @@ class BuddyBLE:
         raise last_err if last_err is not None else OSError("advertise failed with no OSError")
 
     def send_line(self, payload: bytes) -> bool:
-        """Push one JSON line to the host. Returns False if no link.
+        """1 行をキューに積み、キューが空くまで送る。リンクが無ければ False。
 
-        On builds with pairing we wait for encryption; on stripped
-        builds (UIFlow 2.0 today) we consider a raw connection
-        sufficient since there's no encryption layer to wait for.
+        NimBLE の送信バッファが詰まっている間（ENOMEM）は待って送り直す。
+        _NOTIFY_RETRY_MS を過ぎても送り切れない行は、捨てずにキューに残して
+        メインループの pump() に任せる（送りかけを捨てると host 側の行が壊れる）。
         """
         if self._conn is None:
             return False
@@ -513,17 +528,57 @@ class BuddyBLE:
             return False
         if not payload.endswith(b"\n"):
             payload = payload + b"\n"
-        # Default ATT MTU on ESP32 is 23 → 20 bytes of notify payload.
-        # Some hosts negotiate higher; we stay safe with 20 unless the
-        # peer grows the MTU. Chunking is transparent — the host
-        # reassembles by waiting for '\n'.
-        step = 20
-        try:
-            for i in range(0, len(payload), step):
-                self._ble.gatts_notify(self._conn, self._tx_h, payload[i : i + step])
-        except OSError as e:
-            print("buddy_ble: notify failed:", e)
-            return False
+        self.enqueue(payload)
+        t0 = time.ticks_ms()
+        while True:
+            r = self.pump()
+            if r is not False:
+                return r is True
+            if time.ticks_diff(time.ticks_ms(), t0) > _NOTIFY_RETRY_MS:
+                print("buddy_ble: notify still busy, leave it to pump()")
+                return True
+            time.sleep_ms(1)
+
+    def enqueue(self, line):
+        """`\n` で終わる 1 行を、送らずにキューへ積む。"""
+        self._check_reset()
+        self._txq.append(line)
+
+    def tx_idle(self):
+        self._check_reset()
+        return not self._txq
+
+    def _check_reset(self):
+        if self._tx_reset:
+            self._tx_reset = False
+            self._txq = []
+            self._txo = 0
+
+    def pump(self):
+        """キューを送れるだけ送る。送り切れば True、ENOMEM で止まれば False、リンクが無いか失敗なら None。"""
+        self._check_reset()
+        while self._txq:
+            conn = self._conn
+            if conn is None:
+                self._txq = []
+                self._txo = 0
+                return None
+            line = self._txq[0]
+            step = self._mtu - 3
+            mv = memoryview(line)
+            while self._txo < len(line):
+                try:
+                    self._ble.gatts_notify(conn, self._tx_h, mv[self._txo : self._txo + step])
+                except OSError as e:
+                    if e.args and e.args[0] == _ENOMEM:
+                        return False
+                    print("buddy_ble: notify failed:", e)
+                    self._txq = []
+                    self._txo = 0
+                    return None
+                self._txo += step
+            self._txq.pop(0)
+            self._txo = 0
         return True
 
     def disconnect(self):

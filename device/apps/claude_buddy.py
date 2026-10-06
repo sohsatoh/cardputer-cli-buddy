@@ -14,6 +14,8 @@
   入力    Fn+←→ でカーソル移動、Fn+↑↓ で行移動、Del でカーソル前を消す、
           Enter で送信、Esc で取り消し（; , . / は文字として入る）、
           Tab で 英数 / ひらがな / カタカナ を切り替え（ローマ字かな変換、漢字変換はしない）
+  音声    一覧で v、Enter / Space で録音の開始と停止、Tab で ja-JP / en-US、Esc で取り消し、
+          認識結果は入力画面に入る（確認・編集して Enter で送る）
 
 ### 終了
 
@@ -37,6 +39,7 @@ from hardware import MatrixKeyboard
 import buddy_ble
 import buddy_protocol
 import buddy_ui_cp as buddy_ui
+import voice
 
 
 def run():
@@ -86,6 +89,11 @@ def run():
     gc.collect()
     ble = buddy_ble.BuddyBLE(on_line=on_line, on_state=on_state)
     print("CLI Buddy up as", ble.advertised_name)
+    # 音声のバッファ（約 16KB）は、断片化する前に起動時に 1 回だけ確保する
+    gc.collect()
+    vo = voice.Voice(proto)
+    ui.voice = vo
+    print("claude_buddy: free after voice", gc.mem_free())
 
     # 起動に使ったキーを拾わないための待ち（upstream の他アプリと同じ）
     kb = MatrixKeyboard()
@@ -105,9 +113,17 @@ def run():
             k = kb.get_key()
             if k is not None and ui.on_key(k) == "quit":
                 return
+            vo.service(ble)
+            ble.pump()
             ui.refresh()
-            time.sleep_ms(40)
+            # 録音中や送信待ちがある間は、送信を詰まらせないよう短い間隔で回す
+            busy = vo.state in ("rec", "flush") or not ble.tx_idle()
+            time.sleep_ms(5 if busy else 40)
     finally:
+        try:
+            vo.close()
+        except Exception as e:
+            print("claude_buddy: voice close warning:", e)
         try:
             ble.deinit()
         except Exception as e:

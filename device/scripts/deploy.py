@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import push  # noqa: E402
 
 DEVICE = Path(__file__).resolve().parent.parent
-COMPILED = ["crypto.py", "buddy_protocol.py", "buddy_ble.py", "buddy_ui_cp.py", "kana.py"]
+COMPILED = ["crypto.py", "buddy_protocol.py", "buddy_ble.py", "buddy_ui_cp.py", "kana.py", "voice.py"]
+# viper を含むファイルは、アーキテクチャを指定しないと mpy-cross が "invalid arch" で失敗する
+NATIVE = {"voice.py": "xtensawin"}  # ESP32-S3
 PLAIN = [f for f in push.DEFAULT_FILES if f not in COMPILED]
 
 RM_CODE = """import uos
@@ -50,7 +52,8 @@ def compile_mpy(version: str, out: Path) -> list[Path]:
     for name in COMPILED:
         dst = out / (name[:-3] + ".mpy")
         # .mpy にはソースのパスが埋め込まれるので、手元の絶対パスが入らないよう相対名で渡す
-        subprocess.run(cmd + ["-o", str(dst), name], cwd=DEVICE, check=True)
+        arch = ["-march=" + NATIVE[name]] if name in NATIVE else []
+        subprocess.run(cmd + arch + ["-o", str(dst), name], cwd=DEVICE, check=True)
         print(f"{dst.name}: {dst.stat().st_size} bytes")
         paths.append(dst)
     return paths

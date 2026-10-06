@@ -243,3 +243,39 @@ def test_load_key(tmp_path):
     short.write_bytes(b"x" * 31)
     assert bp.load_key(str(short)) is None
     assert bp.load_key(str(tmp_path / "missing.bin")) is None
+
+
+def test_voice_messages_and_audio():
+    d = Dev()
+    assert d.p.voice_begin("v1", "ja-JP") is False and d.p.seal_audio(b"\0\0") is None
+    d.handshake()
+    vid = bp.new_vid()
+    assert len(vid) == 8 and vid.isalnum() and vid != bp.new_vid()
+    assert d.p.voice_begin(vid, "ja-JP")
+    line = d.p.seal_audio(bytes([0, 3]) + b"\x7f" * 1600)
+    d.sent.append(line)
+    assert d.p.voice_end(vid) and d.p.voice_cancel(vid)
+    out = [d.host.open_frame(x) for x in d.sent]
+    assert out == [
+        (host.DATA, {"t": "voice_begin", "vid": vid, "lang": "ja-JP"}),
+        (host.AUDIO, bytes([0, 3]) + b"\x7f" * 1600),
+        (host.DATA, {"t": "voice_end", "vid": vid}),
+        (host.DATA, {"t": "voice_cancel", "vid": vid}),
+    ]
+
+
+def test_voice_results_dispatch():
+    d = Dev()
+    d.handshake()
+    d.push({"t": "voice_text", "vid": "ab12", "text": "こんにちは"})
+    assert d.p.take_voice() == {"t": "voice_text", "vid": "ab12", "text": "こんにちは"}
+    assert d.p.take_voice() is None
+    d.push({"t": "voice_error", "vid": "ab12", "err": "認識できませんでした"})
+    assert d.p.take_voice()["err"] == "認識できませんでした"
+    for bad in ({"t": "voice_text", "vid": 3, "text": "x"}, {"t": "voice_text", "vid": "a"},
+                {"t": "voice_error", "vid": "a", "err": None}):
+        d.push(bad)
+    assert d.p.take_voice() is None
+    d.push({"t": "voice_text", "vid": "a", "text": "x"})
+    d.handshake(nh=bytes(16))
+    assert d.p.take_voice() is None

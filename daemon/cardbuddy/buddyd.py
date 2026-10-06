@@ -5,14 +5,16 @@ import asyncio
 import fcntl
 import logging
 import os
+import re
+import signal
 import stat
 import sys
 import time
 from pathlib import Path
 
-from . import http_api
+from . import http_api, voice
 from .ble_link import Link
-from .session_table import SessionTable
+from .session_table import PROMPT_MAX, SessionTable, trunc
 
 log = logging.getLogger("buddyd")
 
@@ -20,11 +22,19 @@ SESSIONS_DEBOUNCE = 0.5
 EXPIRE_INTERVAL = 5.0
 # 再接続直後に溜まった要求を全部流すと、デバイスの受信キューと画面が古い要求で埋まる
 RESEND_MAX = 8
+VID = re.compile(r"[A-Za-z0-9]{1,8}")
+LANGS = ("ja-JP", "en-US")
 
 
 class Hub:
-    def __init__(self, link=None):
+    def __init__(self, link=None, stt=None):
         self.link = link
+        # 未指定なら cardbuddy.stt を使う、テストでは transcribe と SttError を持つ偽物を渡す
+        self.stt = stt
+        self.voice = voice.Recorder()
+        # stt は子プロセスを最大 180 秒走らせるので、文字起こしは常に 1 本だけにする
+        self.voice_task: asyncio.Task | None = None
+        self._voice_latest: str | None = None
         self.table = SessionTable()
         self.polls: dict[str, int] = {}
         self.wake_event = asyncio.Event()
@@ -47,12 +57,84 @@ class Hub:
         self._kick.set()
 
     def on_up(self):
+        self.on_down()
         self._last_sessions = self.table.sessions_msg()
         self.send([self._last_sessions, *self.table.pending_msgs()[-RESEND_MAX:]])
 
+    def on_down(self):
+        self.voice.reset()
+        self._voice_latest = None
+        self._cancel_voice_task()
+
+    def _cancel_voice_task(self):
+        if self.voice_task is not None:
+            self.voice_task.cancel()
+            self.voice_task = None
+
     def on_msg(self, msg: dict):
+        t = msg.get("t")
+        if isinstance(t, str) and t.startswith("voice_"):
+            self._on_voice(t, msg)
+            return
         self.send(self.table.handle_device(msg))
         self.wake()
+
+    def on_audio(self, pt: bytes):
+        self.voice.audio(pt)
+
+    def _on_voice(self, t: str, msg: dict):
+        vid = msg.get("vid")
+        if not (isinstance(vid, str) and VID.fullmatch(vid)):
+            log.warning("drop %s: bad vid", t)
+        elif t == "voice_begin":
+            if msg.get("lang") not in LANGS:
+                log.warning("drop voice_begin: bad lang")
+                return
+            self._cancel_voice_task()
+            self.voice.begin(vid, msg["lang"])
+            self._voice_latest = vid
+        elif t == "voice_cancel":
+            if vid == self._voice_latest:
+                self.voice.reset()
+                self._voice_latest = None
+                self._cancel_voice_task()
+        elif t == "voice_end":
+            rec = self.voice.end(vid)
+            if rec is None:
+                log.info("drop voice_end for %s: not recording", vid)
+                return
+            self._cancel_voice_task()
+            self.voice_task = asyncio.create_task(self._transcribe(vid, *rec))
+        else:
+            log.warning("drop device message: unknown t=%r", t)
+
+    async def _transcribe(self, vid: str, ulaw: bytes, lang: str):
+        secs = len(ulaw) / voice.RATE
+        t0 = time.monotonic()
+        stt, path = self.stt, None
+        if not ulaw:
+            msg = {"t": "voice_error", "vid": vid, "err": "no audio"}
+        else:
+            try:
+                if stt is None:
+                    from . import stt
+                path = voice.write_wav(home() / "tmp", ulaw)
+                text = await stt.transcribe(str(path), lang)
+                msg = {"t": "voice_text", "vid": vid, "text": trunc(text, PROMPT_MAX)}
+                log.info("voice %s: %.1fs audio transcribed in %.1fs", vid, secs, time.monotonic() - t0)
+            except Exception as e:
+                # 例外の文言に認識結果が混ざりうるので、ログには型名だけを出す
+                log.warning("voice %s: %.1fs audio, transcription failed in %.1fs (%s)",
+                            vid, secs, time.monotonic() - t0, type(e).__name__)
+                known = stt is not None and isinstance(e, stt.SttError) and str(e)
+                msg = {"t": "voice_error", "vid": vid, "err": trunc(str(e), 80) if known else "transcription failed"}
+            finally:
+                if path is not None:
+                    path.unlink(missing_ok=True)
+        if self._voice_latest == vid:
+            self.send([msg])
+        else:
+            log.info("voice %s: result dropped, a newer recording or session replaced it", vid)
 
     async def sessions_loop(self):
         while True:
@@ -112,6 +194,11 @@ def resolve_name(name: str | None) -> str | None:
 async def _amain(key: bytes, name: str | None):
     h = home()
     h.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # 文字起こし中に SIGKILL やクラッシュで落ちると finally が走らず WAV が残る
+    for wav in (h / "tmp").glob("*.wav"):
+        wav.unlink(missing_ok=True)
+    # SIGTERM の既定動作は即終了なので、メインを cancel して asyncio.run に残りのタスクの finally を走らせる
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     # socket の connect 確認だけでは同時起動の 2 本目が生きている socket を消して奪えてしまう
     lock = lock_or_exit(h)  # noqa: F841  プロセス終了まで保持する
     hub = Hub()
@@ -135,5 +222,5 @@ def main():
     log.info("looking for %s", name or "any Claude_* device")
     try:
         asyncio.run(_amain(key, name))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass

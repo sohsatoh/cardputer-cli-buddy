@@ -55,6 +55,7 @@ ENTER, ESC, BS = "ENTER", "ESC", "BS"
 LEFT, RIGHT, UP, DOWN, TAB = "LEFT", "RIGHT", "UP", "DOWN", "TAB"
 _TAB_CODE = 0x2B  # 実機の Tab は HID の usage 値 0x2B で届く（"+" と同じ値なので "+" は入力できない）
 _IME = "Aあア"  # 入力モード: 英数 / ひらがな / カタカナ
+_LANGS = ("ja-JP", "en-US")
 # 矢印キーは単体だと ; , . / の文字になり、Fn と同時に押したときだけ 0xB4..0xB7 になる
 _FN_ARROWS = {0xB4: LEFT, 0xB5: UP, 0xB6: DOWN, 0xB7: RIGHT}
 _UPS = (";", ",", UP)
@@ -168,10 +169,15 @@ def _page_lines(items):
 
 
 class BuddyUI:
-    def __init__(self, proto):
+    def __init__(self, proto, voice=None):
         self.p = proto
+        self.voice = voice
+        self.lang = _LANGS[0]
+        self._vmsg = ("", GRAY_MID)  # 音声入力画面に出す結果やエラー
+        self._vshown = None
+        self._in_ms = None
         self.conn = "advertising"
-        self.mode = "list"  # list / log / input（perm / ask は queue の先頭から決まる）
+        self.mode = "list"  # list / log / input / voice（perm / ask は queue の先頭から決まる）
         self.sel = 0
         self.text = ""
         self.cur = 0
@@ -252,6 +258,39 @@ class BuddyUI:
             self.sel = max(0, len(self.p.sessions) - 1)
         if self.mode == "log":
             self._sync_log()
+        self._sync_voice()
+
+    def _sync_voice(self):
+        v = self.voice
+        st = v.state if v is not None else None
+        if self._head is not None:
+            # perm / ask の表示中に入力画面へ移ると、その画面で押したキーが本文や送信に回るので、結果は保留する
+            if st in ("rec", "flush"):
+                v.cancel()
+                self._vmsg = ("割り込みのため取り消しました", YELLOW)
+                self._dirty = True
+            return
+        res = self.p.take_voice()
+        if v is None:
+            return
+        if res is not None and st == "wait" and res.get("vid") == v.vid:
+            v.done()
+            if res["t"] == "voice_text":
+                self._open_input("list")
+                self._insert(res["text"])
+                self._in_ms = time.ticks_ms()
+            else:
+                self._vmsg = (res["err"], RED)
+            self._dirty = True
+        elif st == "lost":
+            v.done()
+            self._vmsg = ("切断されたため取り消しました", RED)
+            self._dirty = True
+        if self.mode == "voice":
+            shown = (v.state, v.elapsed_ms, v.level >> 10)
+            if shown != self._vshown:
+                self._vshown = shown
+                self._dirty = True
 
     def _sync_log(self):
         n, sid, _ = self.target
@@ -327,11 +366,14 @@ class BuddyUI:
             self._key_ask(key)
         elif self.mode == "log":
             self._key_log(key)
+        elif self.mode == "voice":
+            self._key_voice(key)
         else:
             return self._key_list(key)
         return None
 
     def _open_input(self, back):
+        self._in_ms = None  # 音声の結果を入れたときだけ、Enter を _SETTLE_MS 受け付けない
         self.text, self.cur, self._in_top = "", 0, 0
         self._ro.clear()
         self._back = back
@@ -349,6 +391,11 @@ class BuddyUI:
             self.sel = max(0, self.sel - 1)
         elif key in _DOWNS:
             self.sel = min(max(0, len(ss) - 1), self.sel + 1)
+        elif key in ("v", "V") and self.voice is not None and self.p.ready and ss:
+            s = ss[self.sel]
+            self.target = (s.get("n"), s.get("id"), _str(s.get("name", "")))
+            self._vmsg = ("", GRAY_MID)
+            self.mode = "voice"
         elif key in (ENTER, "l", "L", RIGHT) and self.p.ready and ss:
             s = ss[self.sel]
             self.target = (s.get("n"), s.get("id"), _str(s.get("name", "")))
@@ -388,6 +435,22 @@ class BuddyUI:
     def _kana(self, s):
         return kana.to_kata(s) if self.ime == 2 else s
 
+    def _key_voice(self, key):
+        v = self.voice
+        st = v.state
+        if key == ESC:
+            v.cancel()
+            self.mode = "list"
+        elif key == TAB and st == "idle":
+            self.lang = _LANGS[(_LANGS.index(self.lang) + 1) % len(_LANGS)]
+        elif key in (ENTER, " "):
+            if st == "rec":
+                v.stop()
+            elif st == "idle":
+                self._vmsg = ("", GRAY_MID)
+                if not v.start(self.lang):
+                    self._vmsg = ("開始できません（未接続）", RED)
+
     def _key_input(self, key):
         if key in (TAB, ENTER, LEFT, RIGHT, UP, DOWN):
             self._insert(self._kana(self._ro.flush()))
@@ -415,6 +478,8 @@ class BuddyUI:
                 self.cur = min(sp[to][0] + c - sp[li][0], sp[to][1])
         elif key == ENTER:
             if not t.strip():
+                return
+            if self._in_ms is not None and time.ticks_diff(time.ticks_ms(), self._in_ms) < _SETTLE_MS:
                 return
             n, sid, _ = self.target
             if self.p.send_prompt(n, sid, t):
@@ -492,6 +557,8 @@ class BuddyUI:
             hints = self._draw_ask()
         elif self.mode == "log":
             hints = self._draw_log()
+        elif self.mode == "voice":
+            hints = self._draw_voice()
         else:
             hints = self._draw_list()
         _LCD.fillRect(0, _HINT_Y - 2, _W, 1, ORANGE)
@@ -545,7 +612,31 @@ class BuddyUI:
             _right(state, y, YELLOW if state in ("perm", "ask") else GRAY_MID, bg)
             sub = _str(s.get("last") or s.get("title", ""))
             _text(_fit(sub, _TW - 8), _PAD + 8, y + _LH, GRAY_MID, bg)
-        return "1-9;.選択 Ent入力 lログ Q終了"
+        return "Ent入力 lログ v音声 Q終了" if self.voice is not None else "1-9;.選択 Ent入力 lログ Q終了"
+
+    def _draw_voice(self):
+        n, _, name = self.target
+        v = self.voice
+        lw = _LCD.textWidth(self.lang)
+        _text(_fit("音声 #{} {}".format(n, name), _TW - lw - _PAD), _PAD, _row(0), ORANGE)
+        _right(self.lang, _row(0), GRAY_MID)
+        st = v.state
+        if st == "rec":
+            _text("● 録音中 {}.{} 秒".format(v.elapsed_ms // 1000, v.elapsed_ms // 100 % 10), _PAD, _row(1), RED)
+            y = _row(2) + 4
+            _LCD.fillRect(_PAD, y, _TW, 8, DARK)
+            _LCD.fillRect(_PAD, y, min(_TW, v.level * _TW // 12000), 8, GREEN)
+            if v.dropped:
+                _text("送信が遅れ {} 件を捨てました".format(v.dropped), _PAD, _row(4), YELLOW)
+            return "Ent:停止 Esc:取消"
+        if st in ("flush", "wait"):
+            _text("認識中…", _PAD, _row(1), CYAN)
+            return "Esc:取消"
+        _text("Enter で録音を始めます", _PAD, _row(1), CREAM)
+        if self._vmsg[0]:
+            for i, line in enumerate(_wrap(self._vmsg[0], 3)):
+                _text(line, _PAD, _row(3 + i), self._vmsg[1])
+        return "Ent:録音 Tab:言語 Esc:戻る"
 
     def _draw_log(self):
         n, sid, name = self.target

@@ -1,6 +1,7 @@
 """buddy コマンド: pair / status / install-agent。"""
 
 import argparse
+import getpass
 import http.client
 import json
 import os
@@ -17,6 +18,7 @@ from .buddyd import home, load_key
 
 LABEL = "com.sohsatoh.cardbuddy.buddyd"
 DEVICE_KEY = "/flash/cardbuddy.key"
+DEVICE_WIFI = "/flash/cardbuddy_wifi.json"
 # raw REPL はエコーしないので、paste mode と違って鍵の hex がシリアルの出力に戻ってこない
 DEVICE_CODE = """import binascii, os
 k = binascii.unhexlify('{hex}')
@@ -79,13 +81,25 @@ def pair(args) -> int:
     path = home() / "key"
     new = args.rotate or not path.exists()
     key = os.urandom(32) if new else load_key(path)
+    wifi = None
+    if args.wifi:
+        ssid = input("Wi-Fi SSID: ").strip()
+        psk = getpass.getpass("Wi-Fi password (not echoed): ")
+        if not ssid:
+            raise SystemExit("buddy: SSID is empty")
+        wifi = json.dumps({"ssid": ssid, "psk": psk}).encode()
     with serial.Serial(args.port, 115200, timeout=5) as s:
         name = raw_exec(s, NAME_CODE).decode(errors="replace").strip()
         if not re.fullmatch(r"Claude_[0-9A-F]{6}", name):
             raise SystemExit(f"buddy: unexpected device name: {name!r}")
         out = raw_exec(s, DEVICE_CODE.format(hex=key.hex(), path=DEVICE_KEY))
-    if out.strip() != b"32":
-        raise SystemExit(f"buddy: {DEVICE_KEY} has unexpected size: {out.strip()!r}")
+        if out.strip() != b"32":
+            raise SystemExit(f"buddy: {DEVICE_KEY} has unexpected size: {out.strip()!r}")
+        if wifi is not None:
+            out = raw_exec(s, DEVICE_CODE.format(hex=wifi.hex(), path=DEVICE_WIFI))
+            if out.strip() != str(len(wifi)).encode():
+                raise SystemExit(f"buddy: {DEVICE_WIFI} has unexpected size: {out.strip()!r}")
+            print(f"Wi-Fi settings written to {DEVICE_WIFI}")
     # デバイスへの書き込みが成功してからホスト側を差し替え、片側だけ新しい鍵になるのを避ける
     if new:
         write_private(path, key)
@@ -153,6 +167,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("pair", help="create the shared key and write it to the device over USB")
     p.add_argument("--port", required=True, help="serial port of the Cardputer")
     p.add_argument("--rotate", action="store_true", help="replace the existing key")
+    p.add_argument("--wifi", action="store_true", help="also write Wi-Fi SSID / password (prompted) to the device")
     sub.add_parser("status", help="show buddyd status")
     sub.add_parser("install-agent", help="write the launchd LaunchAgent plist")
     args = ap.parse_args(argv)

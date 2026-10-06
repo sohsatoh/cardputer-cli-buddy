@@ -33,6 +33,7 @@ except ImportError:
 VER = 0x01
 HELLO = 0x48  # 'H'
 DATA = 0x44  # 'D'
+AUDIO = 0x41  # 'A'
 ROLE_HOST = 0x68  # 'h'
 ROLE_DEVICE = 0x64  # 'd'
 DIR_H2D = 0x01
@@ -87,10 +88,17 @@ def _b64enc(raw):
 
 def _ctr(enc_key, d, ctr, data):
     n = (len(data) + 15) // 16
+    if not n:
+        return b""
+    blk = bytearray(16 * n)
     head = bytes([d]) + struct.pack(">I", ctr) + bytes(7)
-    blocks = b"".join(head + struct.pack(">I", i) for i in range(n))
-    ks = aes(enc_key, _ECB).encrypt(blocks) if n else b""
-    return bytes(a ^ b for a, b in zip(data, ks))
+    for i in range(n):
+        blk[16 * i : 16 * i + 12] = head
+        struct.pack_into(">I", blk, 16 * i + 12, i)
+    ks = aes(enc_key, _ECB).encrypt(blk)
+    size = len(data)
+    # 1 byte ずつの XOR より、多倍長整数 1 回の XOR の方が実機で 2 倍以上速い
+    return (int.from_bytes(data, "big") ^ int.from_bytes(ks[:size], "big")).to_bytes(size, "big")
 
 
 def _eq(a, b):
@@ -119,11 +127,11 @@ class Session:
             s = json.dumps(msg)
         return self.seal_bytes(s.encode())
 
-    def seal_bytes(self, pt):
+    def seal_bytes(self, pt, kind=DATA):
         if len(pt) > MAX_PLAINTEXT:
             raise FrameError("plaintext too long")
         self.tx_ctr += 1
-        head = bytes([VER, DATA, self.tx_dir]) + struct.pack(">I", self.tx_ctr)
+        head = bytes([VER, kind, self.tx_dir]) + struct.pack(">I", self.tx_ctr)
         ct = _ctr(self.enc_key, self.tx_dir, self.tx_ctr, pt)
         tag = hmac_sha256(self.mac_key, head + ct)[:16]
         return _b64enc(head + ct + tag)

@@ -49,6 +49,7 @@ DEFAULT_FILES = [
     "buddy_protocol.py",
     "crypto.py",
     "kana.py",
+    "voice.py",
     "burst_frames.py",
     "wifi_event.py",
     "apps/claude_buddy.py",

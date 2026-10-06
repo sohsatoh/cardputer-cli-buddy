@@ -98,3 +98,22 @@ def test_line_limit():
     _, d = sessions()
     with pytest.raises(c.FrameError):
         d.open(b"A" * 4097)
+
+
+def test_audio_frame_matches_vector():
+    h, d = sessions()
+    for f in V["frames"]:
+        tx, rx = (h, d) if f["dir"] == c.DIR_H2D else (d, h)
+        tx.seal_bytes(f["pt"].encode())
+    for f in V["audio_frames"]:
+        assert d.tx_ctr + 1 == f["ctr"]
+        assert d.seal_bytes(bytes.fromhex(f["pt_hex"]), c.AUDIO).decode().rstrip("\n") == f["line"]
+
+
+def test_audio_frame_opens_on_host():
+    enc, mac = c.hkdf(KEY, NH, ND)
+    dev, ref = c.Session(enc, mac, c.DIR_D2H), host.Session(enc, mac, c.DIR_D2H)
+    pt = bytes([0, 7]) + os.urandom(1600)
+    line = dev.seal_bytes(pt, c.AUDIO)
+    assert host.Session(enc, mac, c.DIR_H2D).open_frame(line) == (host.AUDIO, pt)
+    assert ref.seal_bytes(pt, host.AUDIO) == line

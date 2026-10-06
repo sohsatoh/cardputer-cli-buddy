@@ -38,6 +38,10 @@ def load_key(path=KEY_PATH):
     return key
 
 
+def new_vid():
+    return "".join("%02x" % b for b in urandom(4))
+
+
 def _clip(s, n):
     return s if len(s) <= n else s[: n - 1] + "…"
 
@@ -55,6 +59,9 @@ def _check(msg):
                 raise ValueError("o")
     if t == "sessions" and not isinstance(msg["s"], list):
         raise ValueError("s")
+    if t in ("voice_text", "voice_error"):
+        if not isinstance(msg.get("vid"), str) or not isinstance(msg.get("text" if t == "voice_text" else "err"), str):
+            raise ValueError("voice")
     if t == "log":
         if not isinstance(msg.get("p", 0), int):
             raise ValueError("p")
@@ -72,6 +79,7 @@ class Protocol:
         self.queue = []  # 到着順の perm / ask メッセージ
         self.last_ack = None
         self.log = None  # 最後に届いた log 1 件だけを持つ（実機の空きメモリが少ない）
+        self.voice = None  # 最後に届いた voice_text / voice_error
         self.rev = 0
 
     @property
@@ -88,6 +96,7 @@ class Protocol:
         self.queue = []
         self.last_ack = None
         self.log = None
+        self.voice = None
         self.rev += 1
 
     def on_disconnect(self):
@@ -149,6 +158,8 @@ class Protocol:
             self.last_ack = msg
         elif t == "log":
             self.log = msg
+        elif t in ("voice_text", "voice_error"):
+            self.voice = msg
         else:
             print("buddy_protocol: drop: unknown t", t)
             return
@@ -203,3 +214,22 @@ class Protocol:
         """届いた log を返して手放す。UI が折り返した行だけを持ち、元の本文は残さないため。"""
         log, self.log = self.log, None
         return log
+
+    def take_voice(self):
+        v, self.voice = self.voice, None
+        return v
+
+    def voice_begin(self, vid, lang):
+        return self._send({"t": "voice_begin", "vid": vid, "lang": lang})
+
+    def voice_end(self, vid):
+        return self._send({"t": "voice_end", "vid": vid})
+
+    def voice_cancel(self, vid):
+        return self._send({"t": "voice_cancel", "vid": vid})
+
+    def seal_audio(self, pt):
+        """seq と μ-law の平文を Audio フレームの 1 行にする。送るのは呼び出し側（音声は非同期に送るため）。"""
+        if self.session is None:
+            return None
+        return self.session.seal_bytes(pt, crypto.AUDIO)

@@ -2,6 +2,8 @@
 
 English | [日本語](README.ja.md)
 
+![Demo: approving a permission prompt, answering AskUserQuestion, and sending a kana prompt from the Cardputer](docs/demo.gif)
+
 Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over BLE.
 
 - Answer permission dialogs with allow / deny (allow is only offered when the full request fits on screen)
@@ -9,6 +11,7 @@ Drive multiple Claude Code CLI sessions from an M5Stack Cardputer-Adv over BLE.
 - Send prompts
 - Read session logs
 - Type in Japanese kana (Tab cycles between alphanumeric / hiragana / katakana)
+- Dictate a prompt in Japanese or English with the built-in mic, transcribed on-device on the Mac
 
 ## Architecture
 
@@ -40,6 +43,7 @@ flowchart LR
 - macOS (`buddy install-agent` targets launchd; buddyd itself runs anywhere bleak does)
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/)
 - Claude Code
+- For voice input: macOS 26+ and Swift 6.2+ (Xcode or the Command Line Tools)
 
 ## Setup
 
@@ -126,17 +130,37 @@ Each session registered with buddyd gets a number from 1 to 9, shown as `Buddy #
 
 The device boots into a launcher (`main.py`). Select `claude_buddy` with `;` / `.` (or `,` / `/`, or `W` / `S`) and press Enter. Quitting the app with `Q` reboots the device back into the launcher.
 
+### 7. Build the speech-to-text helper (voice input)
+
+buddyd transcribes audio recorded on the device with `daemon/stt/stt`, which uses macOS 26's SpeechTranscriber on-device, so audio never leaves the Mac.
+
+```sh
+make -C daemon/stt
+```
+
+- If `swiftc` is not on your PATH, pass it explicitly: `make -C daemon/stt SWIFTC=/path/to/swiftc`.
+- macOS downloads the speech model for each language (Japanese `ja-JP`, English `en-US`) the first time it is used. This needs network access and takes from a few to tens of seconds (about 12 s for English). To avoid the wait, fetch the models up front:
+
+  ```sh
+  daemon/stt/stt --lang ja-JP --prepare
+  daemon/stt/stt --lang en-US --prepare
+  ```
+
+- No permission prompt appears: SpeechTranscriber uses neither the Speech Recognition privacy permission nor the Dictation setting (verified on macOS 26.5).
+- Once the model is installed, up to 60 s of audio is transcribed in about 1–2 s on Apple Silicon.
+
 ## Keys
 
 Pressed on their own, the Cardputer-Adv arrow keys type `;` `,` `.` `/`. Below, "↑↓" means either the bare `;` `.` keys or Fn+↑↓. Esc is the `` ` `` key.
 
 | Screen | Keys |
 | --- | --- |
-| Session list | `1`–`9` / ↑↓ select, Enter compose a prompt, `l` or Fn+→ open the log, `Q` quit |
+| Session list | `1`–`9` / ↑↓ select, Enter compose a prompt, `l` or Fn+→ open the log, `v` voice input, `Q` quit |
 | Log | ↑↓ scroll (older pages load at the top), `r` reload, Enter compose a prompt, Esc back to the list |
 | Permission | `Y` allow, `N` deny, ↑↓ scroll long requests |
 | Question | `1`–`4` / ↑↓ select, Space toggle (multi-select), Enter confirm |
 | Prompt input | See below |
+| Voice input | Enter or Space start / stop recording, Tab switch Japanese / English (when not recording), Esc cancel |
 
 Prompt input keys:
 
@@ -153,6 +177,7 @@ Prompt input keys:
 - Kana are typed as romaji. There is no kanji conversion. Pending romaji is shown underlined in cyan and is committed before Enter, an arrow key, or Tab takes effect.
 - Tab arrives with the same key code as `+`, so `+` cannot be typed.
 - Prompts are limited to 500 characters.
+- Voice input records up to 60 s. The transcript is placed in the prompt input for you to review and edit; it is sent only when you press Enter.
 - When a permission request does not fit on screen in full (`full` is false), the device shows a warning to check the terminal and accepts only `N`.
 - For 400 ms after a permission request or question appears, the confirming keys (`Y` / `N` / Enter) are ignored, so a keypress meant for the session list cannot answer it by accident.
 - If a permission request or question arrives while you are typing, the input screen stays and shows the number of pending requests. Press Esc to go back and answer.
@@ -172,10 +197,10 @@ See [PROTOCOL.md](PROTOCOL.md) (Japanese) for the details and the threat model. 
 
 ## Tests
 
-Run the Python tests for the daemon, device, and mod together. The device tests run on the host against a fake M5 API.
+Run the Python tests for the daemon, device, and mod together. The device tests run on the host against a fake M5 API. Tests that use the real `stt` binary run only after `make -C daemon/stt`.
 
 ```sh
-uv --directory daemon run pytest -q tests ../device/tests ../mod/tests
+uv --directory daemon run pytest -q tests stt ../device/tests ../mod/tests
 ```
 
 Run the mod's TypeScript tests with:

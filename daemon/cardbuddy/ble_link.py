@@ -114,6 +114,7 @@ class Link:
             self._out = None
             for t in tasks:
                 t.cancel()
+            self.hub.on_down()
         return True
 
     async def _hello(self, conn) -> bytes:
@@ -139,11 +140,14 @@ class Link:
         while True:
             line = await conn.recv_line()
             try:
-                msg = sess.open(line)
+                kind, msg = sess.open_frame(line)
             except crypto.FrameError as e:
                 log.warning("drop frame (%s): %r", e, line[:48])
                 continue
-            self.hub.on_msg(msg)
+            if kind == crypto.AUDIO:
+                self.hub.on_audio(msg)
+            else:
+                self.hub.on_msg(msg)
 
     async def _connect_once(self, name: str | None) -> bool:
         try:

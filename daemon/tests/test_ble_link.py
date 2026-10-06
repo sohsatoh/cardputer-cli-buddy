@@ -307,3 +307,17 @@ async def test_connect_uses_advertised_name(monkeypatch, cached, adv, want, ok):
     assert await link._connect_once(want) is ok
     assert seen.get("device") == (adv if ok else None)
     assert link.device is None
+
+
+@aio
+async def test_audio_frames_reach_recorder_and_disconnect_cancels():
+    hub, link, conn, dev, task = await start()
+    await dev.recv()
+    await dev.send_line(dev.s.seal({"t": "voice_begin", "vid": "v1", "lang": "ja-JP"}))
+    await dev.send_line(dev.s.seal_bytes(b"\x00\x00" + b"\x11" * 10, crypto.AUDIO))
+    await dev.send_line(dev.s.seal_bytes(b"\x00\x01" + b"\x22" * 10, crypto.AUDIO))
+    await asyncio.sleep(0.05)
+    assert hub.voice.vid == "v1" and bytes(hub.voice.buf) == b"\x11" * 10 + b"\x22" * 10
+    await conn.to_host.put(None)
+    assert await asyncio.wait_for(task, 2) is True
+    assert hub.voice.vid is None

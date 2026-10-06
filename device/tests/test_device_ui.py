@@ -7,6 +7,7 @@ import types
 import pytest
 
 from test_device_protocol import Dev
+from test_device_voice import FakeLink, FakeMic, FakeSpeaker
 
 
 FONT_H = 16  # EFontJA24 を 0.6 倍にしたときの fontHeight（0.5 倍の実測 13 から見積もり）
@@ -34,15 +35,19 @@ class FakeLcd:
 @pytest.fixture
 def env(monkeypatch):
     clock = [0]
-    monkeypatch.setitem(sys.modules, "M5", types.SimpleNamespace(Lcd=FakeLcd()))
+    log = []
+    monkeypatch.setitem(sys.modules, "M5", types.SimpleNamespace(Lcd=FakeLcd(), Mic=FakeMic(log), Speaker=FakeSpeaker(log)))
+    monkeypatch.setattr(time, "sleep_ms", lambda ms: None, raising=False)
     monkeypatch.setattr(time, "ticks_ms", lambda: clock[0], raising=False)
     monkeypatch.setattr(time, "ticks_diff", lambda a, b: a - b, raising=False)
     monkeypatch.delitem(sys.modules, "buddy_ui_cp", raising=False)
+    monkeypatch.delitem(sys.modules, "voice", raising=False)
     import buddy_ui_cp
+    import voice
 
     d = Dev()
     d.handshake()
-    ui = buddy_ui_cp.BuddyUI(d.p)
+    ui = buddy_ui_cp.BuddyUI(d.p, voice.Voice(d.p))
     ui.set_connection("connected")
 
     def keys(*ks):
@@ -594,3 +599,157 @@ def test_kana_respects_500_chars(env):
     d, ui, keys, wait = env
     keys(10, *b"x" * 499, TAB, *b"kya")
     assert len(ui.text) == 500 and ui.text.endswith("x" + "き")
+
+
+def _voice_ready(env):
+    d, ui, keys, wait = env
+    keys(ord("3"), ord("v"))
+    assert ui.mode == "voice"
+    return d, ui, keys, sys.modules["M5"].Mic
+
+
+def test_voice_screen_language_toggle_is_remembered(env):
+    d, ui, keys, mic = _voice_ready(env)
+    assert "ja-JP" in _redraw(ui)
+    keys(TAB)
+    assert ui.lang == "en-US" and "en-US" in _redraw(ui)
+    keys(96)
+    assert ui.mode == "list" and d.sent == []
+    keys(ord("v"))
+    assert ui.mode == "voice" and ui.lang == "en-US"
+
+
+def test_voice_record_recognize_and_fill_input(env):
+    d, ui, keys, mic = _voice_ready(env)
+    link = FakeLink()
+    v = ui.voice
+    keys(10)
+    assert d.replies() == [{"t": "voice_begin", "vid": v.vid, "lang": "ja-JP"}]
+    mic.finish(value=4000)
+    v.service(link)
+    drawn = _redraw(ui)
+    assert any("録音中" in s for s in drawn) and any("0.1" in s for s in drawn)
+    keys(TAB)
+    assert ui.lang == "ja-JP"  # 録音中は言語を変えない
+    keys(ord(" "))
+    assert v.state == "flush"
+    mic.finish()
+    mic.finish()
+    v.service(link)
+    v.service(link)
+    assert d.replies() == [{"t": "voice_end", "vid": v.vid}] and v.state == "wait"
+    assert "認識中…" in _redraw(ui)
+    d.push({"t": "voice_text", "vid": "other", "text": "違う録音"})
+    ui.refresh()
+    assert ui.mode == "voice"
+    d.push({"t": "voice_text", "vid": v.vid, "text": "テストです"})
+    ui.refresh()
+    assert ui.mode == "input" and ui.text == "テストです" and ui.cur == 5
+    assert ui.target[:2] == (3, "cccc3333") and v.state == "idle"
+    keys(10)
+    assert d.replies() == []  # 入力画面に移った直後の Enter では送らない
+    env[3]()
+    keys(10)
+    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "テストです"}]
+
+
+def test_voice_error_is_shown_and_can_retry(env):
+    d, ui, keys, mic = _voice_ready(env)
+    link = FakeLink()
+    v = ui.voice
+    keys(10, 10)
+    mic.finish()
+    mic.finish()
+    v.service(link)
+    vid = v.vid
+    d.replies()
+    d.push({"t": "voice_error", "vid": vid, "err": "聞き取れませんでした"})
+    ui.refresh()
+    assert ui.mode == "voice" and any("聞き取れませんでした" in s for s in _redraw(ui))
+    keys(10)
+    assert d.replies()[0]["t"] == "voice_begin" and v.vid != vid
+    mic.finish(value=30000)
+    v.service(link)
+    _redraw(ui)
+    _assert_on_screen(sys.modules["M5"].Lcd)
+
+
+def test_voice_escape_cancels(env):
+    d, ui, keys, mic = _voice_ready(env)
+    v = ui.voice
+    keys(10)
+    vid = v.vid
+    mic.q.clear()
+    keys(96)
+    assert d.replies()[-1] == {"t": "voice_cancel", "vid": vid}
+    assert ui.mode == "list" and v.state == "idle"
+
+
+def test_perm_interrupts_recording_as_cancel(env):
+    d, ui, keys, wait = env
+    d, ui, keys, mic = _voice_ready(env)
+    v = ui.voice
+    keys(10)
+    vid = v.vid
+    mic.q.clear()
+    d.replies()
+    d.push({"t": "perm", "id": "cccc3333", "name": "c", "full": True, "n": 3, "req": "p1", "tool": "Bash", "hint": "ls"})
+    ui.refresh()
+    assert d.replies() == [{"t": "voice_cancel", "vid": vid}] and v.state == "idle"
+    wait()
+    keys(ord("n"))
+    assert ui.mode == "voice" and any("取り消しました" in s for s in _redraw(ui))
+
+
+def test_voice_lost_on_reconnect(env):
+    d, ui, keys, mic = _voice_ready(env)
+    v = ui.voice
+    keys(10)
+    mic.q.clear()
+    d.handshake(nh=bytes(16))
+    v.service(FakeLink())
+    ui.refresh()
+    assert v.state == "idle" and any("切断" in s for s in _redraw(ui))
+
+
+def _recognizing(env):
+    d, ui, keys, mic = _voice_ready(env)
+    v = ui.voice
+    keys(10, 10)
+    mic.finish()
+    mic.finish()
+    v.service(FakeLink())
+    assert v.state == "wait"
+    d.replies()
+    return d, ui, keys, v
+
+
+def test_voice_result_waits_while_ask_is_shown(env):
+    d, ui, keys, v = _recognizing(env)
+    wait = env[3]
+    qs = [{"q": "どれ?", "h": "H", "o": ["a", "b"], "m": False}]
+    d.push({"t": "ask", "id": "cccc3333", "name": "c", "n": 3, "req": "a1", "qs": qs})
+    d.push({"t": "voice_text", "vid": v.vid, "text": "認識した文"})
+    wait()
+    assert ui.mode == "voice" and v.state == "wait" and d.p.voice is not None  # 取り込まずに保留する
+    keys(10)
+    assert d.replies() == [{"t": "ask_reply", "req": "a1", "answers": [[0]]}]
+    ui.refresh()
+    assert ui.mode == "input" and ui.text == "認識した文"
+    keys(10)
+    assert d.replies() == []
+    wait()
+    keys(10)
+    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "認識した文"}]
+
+
+def test_perm_keys_do_not_leak_into_voice_text(env):
+    d, ui, keys, v = _recognizing(env)
+    wait = env[3]
+    d.push({"t": "perm", "id": "cccc3333", "name": "c", "full": True, "n": 3, "req": "p1", "tool": "Bash", "hint": "ls"})
+    d.push({"t": "voice_text", "vid": v.vid, "text": "本文"})
+    wait()
+    keys(ord("y"))
+    assert d.replies() == [{"t": "perm_reply", "req": "p1", "decision": "allow"}]
+    ui.refresh()
+    assert ui.mode == "input" and ui.text == "本文"
