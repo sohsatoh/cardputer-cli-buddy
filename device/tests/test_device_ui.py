@@ -12,6 +12,12 @@ from test_device_voice import FakeLink, FakeMic, FakeSpeaker
 
 FONT_H = 16  # EFontJA24 を 0.6 倍にしたときの fontHeight（0.5 倍の実測 13 から見積もり）
 HINT_Y = 119
+CTRL = 128
+
+
+def _sent(d):
+    """入力画面を開くたびに出る log_req を除いた送信。"""
+    return [m for m in d.replies() if m["t"] != "log_req"]
 
 
 class FakeLcd:
@@ -191,10 +197,10 @@ def test_settle_counts_from_when_perm_is_shown(env):
     keys(96)
     assert ui.mode == "log"
     keys(ord("y"))
-    assert d.sent == []
+    assert _sent(d) == []
     wait()
     keys(ord("y"))
-    assert d.replies() == [{"t": "perm_reply", "req": "p1", "decision": "allow"}]
+    assert _sent(d) == [{"t": "perm_reply", "req": "p1", "decision": "allow"}]
 
 
 def test_perm_deny_and_queue_order(env):
@@ -219,7 +225,7 @@ def test_typing_is_not_an_answer(env):
     d.push({"t": "perm", "id": "cccc3333", "name": "c", "full": True, "n": 3, "req": "p1", "tool": "Bash", "hint": "ls"})
     wait()
     keys(ord("y"), 0x08, ord("!"), 0x0A)
-    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "hi!"}]
+    assert _sent(d) == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "hi!"}]
     assert [q["req"] for q in d.p.queue] == ["p1"]
     d.push({"t": "ack_prompt", "n": 3, "ok": True, "queued": True})
     ui.refresh()
@@ -236,9 +242,9 @@ def test_typing_is_not_an_answer(env):
 def test_escape_cancels_input(env):
     d, ui, keys, wait = env
     keys(0x0A, *b"abc", 0x1B)
-    assert ui.mode == "list" and d.sent == []
+    assert ui.mode == "list" and _sent(d) == []
     keys(0x0A, ord("x"), ord("`"))
-    assert ui.mode == "list" and d.sent == []
+    assert ui.mode == "list" and _sent(d) == []
 
 
 def test_ask_single_then_multi(env):
@@ -308,7 +314,7 @@ def test_cursor_insert_delete_and_move(env):
     keys(*[RIGHT] * 5, ord(";"), ord("."))
     assert (ui.text, ui.cur) == ("abc;.", 5)
     keys(10)
-    assert d.replies()[0]["text"] == "abc;."
+    assert _sent(d)[0]["text"] == "abc;."
 
 
 def test_cursor_moves_by_wrapped_line_and_scrolls(env):
@@ -317,8 +323,12 @@ def test_cursor_moves_by_wrapped_line_and_scrolls(env):
     assert ui.cur == 80
     keys(UP)
     assert ui.cur == 48
-    keys(UP, UP)
+    keys(UP)
     assert ui.cur == 16
+    keys(UP)  # 先頭行の Fn+↑ はログへ移るだけで、カーソルは動かない
+    assert ui._focus == "log" and ui.cur == 16
+    keys(DOWN)  # ログは空なので、すぐ入力欄に戻る
+    assert ui._focus == "input" and ui.cur == 16
     keys(DOWN)
     assert ui.cur == 48
     keys(*[RIGHT] * 100, *b"b" * 300)
@@ -328,7 +338,7 @@ def test_cursor_moves_by_wrapped_line_and_scrolls(env):
     ui.refresh()
     assert any(s.endswith("b" * 10) for s in lcd.drawn)  # カーソルのある最終行が見えている
     keys(*[UP] * 20)
-    assert ui.cur < 32
+    assert ui.cur < 32 and ui._focus == "log"
     lcd.drawn.clear()
     ui._dirty = True
     ui.refresh()
@@ -392,7 +402,9 @@ def test_log_ignores_other_session_and_navigates(env):
     keys(10, *b"hi", 96)
     assert ui.mode == "log"
     keys(10, *b"go", 10)
-    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "go"}]
+    assert _sent(d) == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "go"}]
+    assert ui.mode == "input" and ui.text == ""  # 送った後も入力画面に残って返答を待つ
+    keys(96)
     assert ui.mode == "log"
     keys(96)
     assert ui.mode == "list"
@@ -552,9 +564,16 @@ def test_every_screen_fits(env):
     d.push({"t": "log", "n": 9, "p": 0, "more": True, "items": [{"r": "u", "x": long_ja}, {"r": "a", "x": "一行目\n" + long_ja}]})
     snap()
     keys(10, *("x" * 400).encode())
+    d.push({"t": "log", "n": 9, "p": 0, "more": True, "items": [{"r": "u", "x": long_ja}, {"r": "a", "x": "一行目\n" + long_ja}]})
     d.push({"t": "perm", "id": "id000009", "name": "名前9", "full": True, "n": 9, "req": "p3", "tool": "Bash", "hint": "ls"})
     snap()
-    assert ui.mode == "input" and len(screens) == 6
+    keys(UP, UP, UP)  # ログ側
+    snap()
+    keys(DOWN, DOWN, DOWN, DOWN, CTRL)
+    sys.modules["M5"].Mic.finish(value=30000)
+    ui.voice.service(FakeLink())
+    snap()
+    assert ui.mode == "input" and ui.voice.state == "rec" and len(screens) == 8
 
 
 def test_japanese_is_drawn_as_is(env):
@@ -588,7 +607,7 @@ def test_hiragana_input_and_send(env):
     keys(*b"nihon")
     assert ui.text.endswith("にほ") and ui._ro.pending == "n"
     keys(10)  # Enter は未確定の n を「ん」にしてから送る
-    assert d.replies() == [{"t": "prompt", "n": 1, "id": "aaaa1111", "text": "きょうはいいてんきですねにほん"}]
+    assert _sent(d) == [{"t": "prompt", "n": 1, "id": "aaaa1111", "text": "きょうはいいてんきですねにほん"}]
 
 
 def test_katakana_and_pending_display(env):
@@ -616,7 +635,7 @@ def test_kana_inserts_at_cursor_and_commits_before_moving(env):
 def test_escape_discards_pending_and_mode_persists(env):
     d, ui, keys, wait = env
     keys(10, TAB, ord("k"), 96)
-    assert ui.mode == "list" and d.sent == []
+    assert ui.mode == "list" and _sent(d) == []
     keys(10)
     assert ui.ime == 1 and ui._ro.pending == "" and ui.text == ""
 
@@ -627,37 +646,136 @@ def test_kana_respects_500_chars(env):
     assert len(ui.text) == 500 and ui.text.endswith("x" + "き")
 
 
+def _in_rows(lcd):
+    """入力画面の本文（ヘッダとヒントを除く）を、行の y ごとにまとめる。"""
+    rows = {}
+    for t, x, y in lcd.pos:
+        if 0 < y < HINT_Y:
+            rows.setdefault(y, []).append(t)
+    return ["".join(rows[y]) for y in sorted(rows)]
+
+
+def _hint(lcd):
+    return [t for t, x, y in lcd.pos if y == HINT_Y][-1]
+
+
+def test_input_shows_log_above_and_text_below(env):
+    d, ui, keys, wait = env
+    lcd = sys.modules["M5"].Lcd
+    keys(ord("3"), 10)
+    assert d.replies() == [{"t": "log_req", "n": 3, "id": "cccc3333", "p": 0}]  # 開いたら最新のログを読む
+    items = [{"r": "a", "x": "返答 %d" % i} for i in range(10)] + [{"r": "u", "x": "最後"}]
+    d.push(_page(0, False, items))
+    keys(*b"hello")
+    lcd.pos.clear()
+    _redraw(ui)
+    rows = _in_rows(lcd)
+    # 見出し、ログ 3 行（最新が下）、入力 2 行
+    assert rows[0].startswith("→ #3 c") and rows[1:4] == ["返答 8", "返答 9", "> 最後"] and rows[4] == "hello"
+    assert "^音声" in _hint(lcd) and "Fn↑ログ" in _hint(lcd) and "Ent送信" in _hint(lcd)
+    _assert_on_screen(lcd)
+    d.push({"t": "perm", "id": "aaaa1111", "name": "a", "full": True, "n": 1, "req": "p1", "tool": "Bash", "hint": "ls"})
+    lcd.pos.clear()
+    _redraw(ui)
+    rows = _in_rows(lcd)
+    assert "1件待ち" in rows[1] and rows[2:4] == ["返答 9", "> 最後"] and rows[4] == "hello"  # 帯の分だけログを 1 行減らす
+
+
+def test_input_log_focus_keeps_text_and_pages_older(env):
+    d, ui, keys, wait = env
+    lcd = sys.modules["M5"].Lcd
+    keys(ord("3"), 10, *b"ab", LEFT, TAB, ord("k"))
+    d.replies()
+    d.push(_page(0, True, [{"r": "a", "x": "新 %d" % i} for i in range(6)]))
+    keys(UP)  # 先頭行の Fn+↑ でログへ
+    assert ui._focus == "log" and (ui.text, ui.cur, ui._ro.pending) == ("ab", 1, "k")
+    assert "Fn↓" in _hint(lcd) and "k" in "".join(_redraw(ui))  # 未確定分は表示も残す
+    bottom = ui._log_top
+    keys(UP)
+    assert ui._log_top == bottom - 1 and d.replies() == []
+    keys(*[UP] * 10)
+    assert ui._log_top == 0 and d.replies() == [{"t": "log_req", "n": 3, "id": "cccc3333", "p": 1}]
+    d.push(_page(1, False, [{"r": "u", "x": "古 %d" % i} for i in range(4)]))
+    ui.refresh()
+    assert ui._log_top == 4  # 前に足した分だけずらして、見ている行を保つ
+    keys(*[UP] * 10)
+    assert "古 0" in _in_rows(lcd)[1]
+    keys(*[DOWN] * 7)
+    assert ui._focus == "log" and ui._log_top == ui._log_bottom() == 7
+    keys(DOWN)  # 下端で入力欄に戻る
+    assert ui._focus == "input" and (ui.text, ui.cur, ui._ro.pending) == ("ab", 1, "k")
+    keys(ord("a"))
+    assert (ui.text, ui.cur) == ("aかb", 2)
+    keys(UP, ord("i"))  # ログ側で打った文字は入力欄に戻って入る
+    assert ui._focus == "input" and ui.text == "aかいb"
+    keys(UP, 96)  # Esc も入力欄に戻るだけ
+    assert ui.mode == "input" and ui._focus == "input" and ui.text == "aかいb"
+
+
+def test_input_log_follows_state_and_send(env):
+    d, ui, keys, wait = env
+    keys(ord("3"), 10)
+    d.replies()
+    sessions = [
+        {"n": 1, "id": "aaaa1111", "name": "a", "title": "実装", "state": "running"},
+        {"n": 3, "id": "cccc3333", "name": "c", "title": "t", "state": "perm"},
+    ]
+    d.push({"t": "sessions", "s": sessions})
+    ui.refresh()
+    assert d.replies() == []
+    sessions[1]["state"] = "running"
+    d.push({"t": "sessions", "s": sessions})
+    ui.refresh()
+    assert d.replies() == [{"t": "log_req", "n": 3, "id": "cccc3333", "p": 0}]
+    keys(*b"go", 10)
+    assert d.replies() == [
+        {"t": "prompt", "n": 3, "id": "cccc3333", "text": "go"},
+        {"t": "log_req", "n": 3, "id": "cccc3333", "p": 0},
+    ]
+    assert ui.mode == "input" and (ui.text, ui.cur) == ("", 0)
+
+
 def _voice_ready(env):
     d, ui, keys, wait = env
-    keys(ord("3"), ord("v"))
-    assert ui.mode == "voice"
+    keys(ord("3"), 10)
+    assert ui.mode == "input"
+    d.replies()
     return d, ui, keys, sys.modules["M5"].Mic
 
 
-def test_voice_screen_language_toggle_is_remembered(env):
+def test_voice_language_follows_input_mode(env):
     d, ui, keys, mic = _voice_ready(env)
-    assert "ja-JP" in _redraw(ui)
-    keys(TAB)
-    assert ui.lang == "en-US" and "en-US" in _redraw(ui)
+    v = ui.voice
+    keys(CTRL)
+    assert d.replies() == [{"t": "voice_begin", "vid": v.vid, "lang": "en-US"}]  # A は英語
+    mic.q.clear()
     keys(96)
-    assert ui.mode == "list" and d.sent == []
-    keys(ord("v"))
-    assert ui.mode == "voice" and ui.lang == "en-US"
+    assert ui.mode == "input" and v.state == "idle"  # Esc は録音だけを取り消す
+    d.replies()
+    for _ in range(2):
+        keys(TAB, CTRL)  # あ / ア は日本語
+        assert d.replies() == [{"t": "voice_begin", "vid": v.vid, "lang": "ja-JP"}]
+        mic.q.clear()
+        keys(96)
+        d.replies()
 
 
-def test_voice_record_recognize_and_fill_input(env):
+def test_voice_record_recognize_and_insert_at_cursor(env):
     d, ui, keys, mic = _voice_ready(env)
     link = FakeLink()
     v = ui.voice
-    keys(10)
+    keys(*b"ab", LEFT, TAB, ord("k"))
+    keys(CTRL)  # 未確定のローマ字は確定してから録音する
     assert d.replies() == [{"t": "voice_begin", "vid": v.vid, "lang": "ja-JP"}]
+    assert (ui.text, ui.cur) == ("akb", 2)
     mic.finish(value=4000)
     v.service(link)
     drawn = _redraw(ui)
-    assert any("録音中 0 秒" in s for s in drawn)
-    keys(TAB)
-    assert ui.lang == "ja-JP"  # 録音中は言語を変えない
-    keys(ord(" "))
+    assert any("録音中 0 秒" in s for s in drawn) and "akb" not in drawn  # 録音中は入力欄に状態を出す
+    assert "^停止" in _hint(sys.modules["M5"].Lcd)
+    keys(ord("x"), 8, 10, TAB)
+    assert (ui.text, ui.ime) == ("akb", 1)  # 録音中は文字や送信を受け付けない
+    keys(CTRL)
     assert v.state == "flush"
     mic.finish()
     mic.finish()
@@ -669,23 +787,37 @@ def test_voice_record_recognize_and_fill_input(env):
     assert "認識中…" in _redraw(ui)
     d.push({"t": "voice_text", "vid": "other", "text": "違う録音"})
     ui.refresh()
-    assert ui.mode == "voice"
+    assert ui.text == "akb"
     d.push({"t": "voice_text", "vid": v.vid, "text": "テストです"})
     ui.refresh()
-    assert ui.mode == "input" and ui.text == "テストです" and ui.cur == 5
+    assert ui.mode == "input" and (ui.text, ui.cur) == ("akテストですb", 7)
     assert ui.target[:2] == (3, "cccc3333") and v.state == "idle"
+    assert "akテストですb" in "".join(_redraw(ui))
     keys(10)
-    assert d.replies() == []  # 入力画面に移った直後の Enter では送らない
+    assert _sent(d) == []  # 入れた直後の Enter では送らない
     env[3]()
     keys(10)
-    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "テストです"}]
+    assert _sent(d) == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "akテストですb"}]
+
+
+def test_list_v_opens_input_and_starts_recording(env):
+    d, ui, keys, wait = env
+    keys(ord("3"), ord("v"))
+    v = ui.voice
+    assert ui.mode == "input" and v.state == "rec" and ui.target[:2] == (3, "cccc3333")
+    assert d.replies() == [
+        {"t": "log_req", "n": 3, "id": "cccc3333", "p": 0},
+        {"t": "voice_begin", "vid": v.vid, "lang": "en-US"},
+    ]
+    keys(CTRL)
+    assert v.state == "flush"
 
 
 def test_voice_error_is_shown_and_can_retry(env):
     d, ui, keys, mic = _voice_ready(env)
     link = FakeLink()
     v = ui.voice
-    keys(10, 10)
+    keys(CTRL, CTRL)
     mic.finish()
     mic.finish()
     for _ in range(5):
@@ -694,8 +826,8 @@ def test_voice_error_is_shown_and_can_retry(env):
     d.replies()
     d.push({"t": "voice_error", "vid": vid, "err": "聞き取れませんでした"})
     ui.refresh()
-    assert ui.mode == "voice" and any("聞き取れませんでした" in s for s in _redraw(ui))
-    keys(10)
+    assert ui.mode == "input" and any("聞き取れませんでした" in s for s in _redraw(ui))
+    keys(CTRL)
     assert d.replies()[0]["t"] == "voice_begin" and v.vid != vid
     mic.finish(value=30000)
     v.service(link)
@@ -706,34 +838,41 @@ def test_voice_error_is_shown_and_can_retry(env):
 def test_voice_escape_cancels(env):
     d, ui, keys, mic = _voice_ready(env)
     v = ui.voice
-    keys(10)
+    keys(*b"keep", CTRL)
     vid = v.vid
     mic.q.clear()
     keys(96)
     assert d.replies()[-1] == {"t": "voice_cancel", "vid": vid}
-    assert ui.mode == "list" and v.state == "idle"
+    assert ui.mode == "input" and v.state == "idle" and ui.text == "keep"
+    keys(96)
+    assert ui.mode == "list"
 
 
-def test_perm_interrupts_recording_as_cancel(env):
-    d, ui, keys, wait = env
+def test_perm_during_recording_keeps_recording(env):
     d, ui, keys, mic = _voice_ready(env)
     v = ui.voice
-    keys(10)
-    vid = v.vid
-    mic.q.clear()
+    keys(CTRL)
     d.replies()
     d.push({"t": "perm", "id": "cccc3333", "name": "c", "full": True, "n": 3, "req": "p1", "tool": "Bash", "hint": "ls"})
     ui.refresh()
-    assert d.replies() == [{"t": "voice_cancel", "vid": vid}] and v.state == "idle"
-    wait()
-    keys(ord("n"))
-    assert ui.mode == "voice" and any("取り消しました" in s for s in _redraw(ui))
+    # 入力画面では perm を出さず件数だけ出すので、録音を続けて、結果も入力欄に入れる
+    assert d.replies() == [] and v.state == "rec"
+    assert any("1件待ち" in s for s in _redraw(ui))
+    _assert_on_screen(sys.modules["M5"].Lcd)
+    keys(CTRL)
+    mic.finish()
+    mic.finish()
+    for _ in range(5):
+        v.service(FakeLink())
+    d.push({"t": "voice_text", "vid": v.vid, "text": "本文"})
+    ui.refresh()
+    assert ui.mode == "input" and ui.text == "本文" and [q["req"] for q in d.p.queue] == ["p1"]
 
 
 def test_voice_lost_on_reconnect(env):
     d, ui, keys, mic = _voice_ready(env)
     v = ui.voice
-    keys(10)
+    keys(CTRL)
     mic.q.clear()
     d.handshake(nh=bytes(16))
     v.service(FakeLink())
@@ -744,7 +883,7 @@ def test_voice_lost_on_reconnect(env):
 def _recognizing(env):
     d, ui, keys, mic = _voice_ready(env)
     v = ui.voice
-    keys(10, 10)
+    keys(CTRL, CTRL)
     mic.finish()
     mic.finish()
     for _ in range(5):
@@ -757,32 +896,21 @@ def _recognizing(env):
 def test_voice_result_waits_while_ask_is_shown(env):
     d, ui, keys, v = _recognizing(env)
     wait = env[3]
+    ui.mode = "list"  # 入力画面の外（perm / ask を出す画面）で結果が届いた場合
     qs = [{"q": "どれ?", "h": "H", "o": ["a", "b"], "m": False}]
     d.push({"t": "ask", "id": "cccc3333", "name": "c", "n": 3, "req": "a1", "qs": qs})
     d.push({"t": "voice_text", "vid": v.vid, "text": "認識した文"})
     wait()
-    assert ui.mode == "voice" and v.state == "wait" and d.p.voice is not None  # 取り込まずに保留する
+    assert ui.mode == "list" and v.state == "wait" and d.p.voice is not None  # 取り込まずに保留する
     keys(10)
-    assert d.replies() == [{"t": "ask_reply", "req": "a1", "answers": [[0]]}]
+    assert _sent(d) == [{"t": "ask_reply", "req": "a1", "answers": [[0]]}]
     ui.refresh()
     assert ui.mode == "input" and ui.text == "認識した文"
     keys(10)
-    assert d.replies() == []
+    assert _sent(d) == []
     wait()
     keys(10)
-    assert d.replies() == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "認識した文"}]
-
-
-def test_perm_keys_do_not_leak_into_voice_text(env):
-    d, ui, keys, v = _recognizing(env)
-    wait = env[3]
-    d.push({"t": "perm", "id": "cccc3333", "name": "c", "full": True, "n": 3, "req": "p1", "tool": "Bash", "hint": "ls"})
-    d.push({"t": "voice_text", "vid": v.vid, "text": "本文"})
-    wait()
-    keys(ord("y"))
-    assert d.replies() == [{"t": "perm_reply", "req": "p1", "decision": "allow"}]
-    ui.refresh()
-    assert ui.mode == "input" and ui.text == "本文"
+    assert _sent(d) == [{"t": "prompt", "n": 3, "id": "cccc3333", "text": "認識した文"}]
 
 
 def test_header_shows_link_kind(env):
@@ -805,7 +933,7 @@ def test_voice_memory_error_is_shown(env, monkeypatch):
 
     monkeypatch.setattr(voice, "bytearray", no_memory, raising=False)
     ui.voice = voice.Voice(d.p)  # 起動時の確保に失敗した場合
-    keys(10)
+    keys(CTRL)
     assert ui.voice.state == "idle" and d.replies() == []
     assert any("メモリ" in s for s in _redraw(ui))
 
@@ -815,7 +943,7 @@ def test_voice_timeout_reason_is_shown(env):
     import voice
 
     v = ui.voice
-    keys(10, 10)
+    keys(CTRL, CTRL)
     mic.finish()
     mic.finish()
     for _ in range(5):
@@ -824,14 +952,14 @@ def test_voice_timeout_reason_is_shown(env):
     v._t_stop = time.ticks_ms() - voice.WAIT_MS - 1  # 停止から上限時間が過ぎた
     v.service(FakeLink())
     assert v.state == "lost"
-    assert any("時間内に認識できなかった" in s for s in _redraw(ui)) and v.state == "idle"
+    assert any("時間切れ" in s for s in _redraw(ui)) and v.state == "idle"
 
 
 def test_recording_screen_redraws_at_most_twice_a_second(env):
     d, ui, keys, mic = _voice_ready(env)
     v = ui.voice
     link = FakeLink()
-    keys(10)
+    keys(CTRL)
     lcd = sys.modules["M5"].Lcd
     ui.refresh()
     draws = []
@@ -925,3 +1053,27 @@ def wait_battery(ui, env):
     """前回の取得から、取得の間隔（BATTERY_MS）がちょうど過ぎたことにして描き直す。"""
     ui._bat_ms = time.ticks_ms() - buddy_ui_cp_mod().BATTERY_MS
     ui.refresh()
+
+
+def test_voice_messages_fit_the_header(env):
+    """音声入力の結果やエラーはヘッダの左に出すので、Wi-Fi と電池の表示があっても省略せずに収める。"""
+    import re
+
+    import voice
+    from test_device_protocol import Link, _hello
+
+    d, ui, keys, wait = env
+    power, lcd = sys.modules["M5"].Power, sys.modules["M5"].Lcd
+    power.charging, power.level = True, 100
+    wifi = Link("Wi-Fi")
+    _, ack = _hello(d.p, wifi)
+    d.p.on_line(ack, wifi)
+    wait_battery(ui, env)
+    src = open(voice.__file__, encoding="utf-8").read() + open(buddy_ui_cp_mod().__file__, encoding="utf-8").read()
+    msgs = re.findall(r'(?:self\.err = |_abort\(|v\.err or |self\.status = \()"([^"{]*(?:音声|録音|flash|切断|認識|取り消)[^"]*)"', src)
+    assert len(msgs) >= 10
+    for m in msgs:
+        ui.status = (m, 0)
+        lcd.pos.clear()
+        _redraw(ui)
+        assert m in [t for t, x in _header(lcd)], m

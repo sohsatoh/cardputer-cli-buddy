@@ -121,12 +121,13 @@ class Voice:
         self.vid = None
         self.level = 0
         self.gaps = 0  # マイクのバッファが 2 面とも埋まって取りこぼした回数（診断用）
-        self.err = None  # 録音できない・中断した理由（表示用）
+        self.err = None  # 録音できない・中断した理由。ヘッダの左に出すので、かな 10 文字ほどに収める
         self._path = path or SPOOL
         self._f = None
         self._mic_on = False
         self._sess = None
         self._t_stop = 0
+        self._q_link = None  # 最後に音声の行を積んだリンク
         self._mic, self._wbuf, self._rbuf, self._tx = bufs or alloc() or (None, None, None, None)
         _remove(self._path)  # 前回の異常終了で残ったもの
         self._reset()
@@ -150,21 +151,21 @@ class Voice:
     def start(self, lang):
         self.err = None
         if self._mic is None:
-            self.err = "メモリが足りないため録音できません"
+            self.err = "メモリ不足で録音不可"
             return False
         try:
             if _flash_free(self._path) < MAX_FRAMES * FRAME:
-                self.err = "flash の空きが足りないため録音できません"
+                self.err = "flash の空き不足"
                 return False
             self._f = open(self._path, "w+b")
         except OSError as e:
-            self.err = "flash に書けないため録音できません"
+            self.err = "flash に書けません"
             print("voice: spool open failed:", e)
             return False
         vid = buddy_protocol.new_vid()
         if not self.p.voice_begin(vid, lang):
             self._close()
-            self.err = "開始できません（未接続）"
+            self.err = "未接続で録音不可"
             return False
         self.vid, self._sess = vid, self.p.session
         self._reset()
@@ -173,6 +174,14 @@ class Voice:
         self._mic_on = True
         for _ in range(2):
             self._record()
+        if not M5.Mic.isRecording():
+            # I2S の DMA などに IDF ヒープが約 7KB 要り、足りないと黙って始まらない（実機）
+            print("voice: mic did not start")
+            self._mic_off()
+            self.p.voice_cancel(vid)
+            self._close()
+            self.err = "メモリ不足で録音不可"
+            return False
         self.state = "rec"
         return True
 
@@ -263,13 +272,13 @@ class Voice:
         """メインループから毎回呼ぶ。link は tx_idle() / enqueue(line) を持つ送信キュー。"""
         st = self.state
         if st in ("rec", "flush", "wait") and self.p.session is not self._sess:
-            self._abort("切断されたため取り消しました")
+            self._abort("切断で音声を取り消し")
             return
         if st == "flush" and buddy_protocol.since(self._t_stop) > self.elapsed_ms * FLUSH_PER_REC + FLUSH_EXTRA_MS:
-            self._abort("送り切れなかったため取り消しました")
+            self._abort("送り切れず取り消し")
             return
         if st == "wait" and buddy_protocol.since(self._t_stop) > WAIT_MS:
-            self._abort("時間内に認識できなかったため取り消しました")
+            self._abort("認識が時間切れ")
             return
         try:
             if self._mic_on:
@@ -281,16 +290,21 @@ class Voice:
             # 録音中は flash に溜めるだけにして、止めてから送る。BLE は録音中も送る
             hold = self.state == "rec" and getattr(link, "kind", "") == "Wi-Fi"
             # 1 回に 1 フレームだけ送る。残りは次の周回で、main loop の pump が送り終えてから
-            if not hold and self._f is not None and self._sent < self._written and link.tx_idle():
+            # 行は共有バッファを指すので、前に積んだリンク（途中で替わることがある）が送り終えるまで次を作らない
+            q = self._q_link
+            if (not hold and self._f is not None and self._sent < self._written and link.tx_idle()
+                    and (q is None or q.tx_idle())):
                 self._f.seek(self._sent * FRAME)
                 self._f.readinto(self._rbuf)
                 line = self.p.seal_audio(self._rbuf, self._tx)
-                if line:
-                    link.enqueue(line)
+                if not line:
+                    return  # 暗号化できなかった。同じフレームを次の周回で送り直す
+                link.enqueue(line)
+                self._q_link = link
                 self._sent += 1
         except OSError as e:
             print("voice: spool error:", e)
-            self._abort("flash の読み書きに失敗したため取り消しました")
+            self._abort("flash の読み書き失敗")
             return
         if self.state == "flush" and not self._mic_on and not self._n and self._sent == self._written:
             self.p.voice_end(self.vid)

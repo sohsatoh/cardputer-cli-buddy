@@ -69,8 +69,8 @@ uv --directory daemon run python ../device/scripts/deploy.py --port /dev/cu.usbm
 `device/scripts/deploy.py` does the following:
 
 1. Compiles the large modules (`crypto`, `buddy_protocol`, `buddy_ble`, `buddy_ui_cp`, `kana`) to `.mpy` with mpy-cross. The device has only about 60 KB of free memory, which is not enough to compile them from `.py` at import time.
-2. Writes the `.mpy` files and the files that stay as `.py` (`main.py`, `apps/*.py`, and so on) to `/flash/`.
-3. Removes any `.py` file on the device with the same name as a `.mpy`, because MicroPython imports `.py` in preference to `.mpy`.
+2. Writes the `.mpy` files and the files that stay as `.py` (`main.py`) to `/flash/`.
+3. Removes any `.py` file on the device with the same name as a `.mpy`, because MicroPython imports `.py` in preference to `.mpy`. Also removes files that earlier versions installed and that are no longer used (the launcher and the apps under `apps/`).
 4. Sets the NVS key `uiflow.boot_option` to 2, so the device boots into `/flash/main.py` instead of the UIFlow launcher.
 5. Reboots the device.
 
@@ -135,9 +135,9 @@ To load it every time, set `CLAUDE_CODE_PLUGIN_DIRS` under `env` in your setting
 
 Each session registered with buddyd gets a number from 1 to 9, shown as `Buddy #n` in the terminal status line. It matches the number in the device's session list.
 
-### 6. Launch the app on the device
+### 6. Start the app on the device
 
-The device boots into a launcher (`main.py`). Select `claude_buddy` with `;` / `.` (or `,` / `/`, or `W` / `S`) and press Enter. Quitting the app with `Q` reboots the device back into the launcher.
+The device starts the app (`main.py`) when it boots. Pressing `Q` reboots the device, which restarts the app. For development, sending Ctrl-C over the USB serial port stops the app and drops into the REPL.
 
 ### 7. Build the speech-to-text helper (voice input)
 
@@ -164,29 +164,32 @@ Pressed on their own, the Cardputer-Adv arrow keys type `;` `,` `.` `/`. Below, 
 
 | Screen | Keys |
 | --- | --- |
-| Session list | `1`–`9` / ↑↓ select, Enter compose a prompt, `l` or Fn+→ open the log, `v` voice input, `Q` quit |
+| Session list | `1`–`9` / ↑↓ select, Enter compose a prompt, `l` or Fn+→ open the log, `v` compose a prompt and start recording, `Q` quit |
 | Log | ↑↓ scroll (older pages load at the top), `r` reload, Enter compose a prompt, Esc back to the list |
 | Permission | `Y` allow, `N` deny, ↑↓ scroll long requests |
 | Question | `1`–`4` / ↑↓ select, Space toggle (multi-select), Enter confirm |
 | Prompt input | See below |
-| Voice input | Enter or Space start / stop recording, Tab switch Japanese / English (when not recording), Esc cancel |
+
+The prompt input screen shows the selected session's log in the top three lines and the prompt in the bottom two. The log reloads when the screen opens, when the session's state changes, and after you send, and it follows the latest lines. An orange bar on the left marks the side that receives the keys.
 
 Prompt input keys:
 
 | Key | Action |
 | --- | --- |
 | Fn+← / Fn+→ | Move the cursor left / right |
-| Fn+↑ / Fn+↓ | Move the cursor up / down a line |
+| Fn+↑ / Fn+↓ | Move the cursor up / down a line. Fn+↑ on the first line moves to the log |
+| Fn+↑ / Fn+↓ (in the log) | Scroll the log by one line (older pages load at the top). Fn+↓ at the bottom, Esc, or any other key returns to the prompt |
+| Ctrl | Start recording. Press again to stop |
 | Del | Delete the character before the cursor (pending romaji is deleted first) |
-| Enter | Send |
-| Esc | Cancel and go back |
+| Enter | Send and stay on the screen to watch the reply in the log |
+| Esc | Cancel recording if recording; otherwise discard the prompt and go back |
 | Tab | Cycle alphanumeric / hiragana / katakana |
 
 - In the input screen, the bare `;` `,` `.` `/` keys type those characters.
-- Kana are typed as romaji. There is no kanji conversion. Pending romaji is shown underlined in cyan and is committed before Enter, an arrow key, or Tab takes effect.
+- Kana are typed as romaji. There is no kanji conversion. Pending romaji is shown underlined in cyan and is committed before Enter, an arrow key, Tab, or Ctrl takes effect. Moving to the log keeps the prompt, the cursor, and the pending romaji as they are.
 - Tab arrives with the same key code as `+`, so `+` cannot be typed.
 - Prompts are limited to 500 characters.
-- Voice input records up to 60 s. The transcript is placed in the prompt input for you to review and edit; it is sent only when you press Enter.
+- Voice input records up to 60 s, in English when the input mode is alphanumeric (`A`) and in Japanese when it is hiragana or katakana. While recording, the prompt area shows the elapsed time and the input level; after you stop, it shows the upload progress and then "認識中…" (recognizing). The transcript is inserted at the cursor, keeping the existing text, and is sent only when you press Enter. Enter is ignored for 400 ms after the insertion.
 - When a permission request does not fit on screen in full (`full` is false), the device shows a warning to check the terminal and accepts only `N`.
 - For 400 ms after a permission request or question appears, the confirming keys (`Y` / `N` / Enter) are ignored, so a keypress meant for the session list cannot answer it by accident.
 - If a permission request or question arrives while you are typing, the input screen stays and shows the number of pending requests. Press Esc to go back and answer.

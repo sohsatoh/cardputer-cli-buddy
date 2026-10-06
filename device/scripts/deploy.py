@@ -7,7 +7,7 @@
 - 空きメモリが約 60KB しかないため、大きいモジュールは mpy-cross で .mpy にして入れる。
   mpy-cross はデバイスの MicroPython に合わせる（UIFlow2 v2.4.2 は 1.25、mpy v6.3）。
 - MicroPython は同名の .py を .mpy より先に import するので、デバイス上の .py は消す。
-- main.py（ランチャー）を起動させるため、NVS の uiflow.boot_option を 2 にする。
+- main.py（Claude Buddy を直接動かす入口）を起動させるため、NVS の uiflow.boot_option を 2 にする。
 """
 
 import argparse
@@ -23,10 +23,14 @@ import push  # noqa: E402
 DEVICE = Path(__file__).resolve().parent.parent
 COMPILED = [
     "crypto.py", "buddy_protocol.py", "buddy_ble.py", "buddy_ui_cp.py", "kana.py", "voice.py", "wifi_link.py",
-    "buddy_app.py", "launcher.py", "burst_frames.py",
+    "buddy_app.py",
 ]
-# 以前の版が入れていたが、今は使わないファイル（起動時の自動接続が Wi-Fi の接続を妨げるため消す）
-OBSOLETE = ["wifi_event.py"]
+# 以前の版が入れていたが、今は使わないファイル。wifi_event は起動時の自動接続が Wi-Fi の接続を妨げ、
+# ランチャーと upstream のアプリは、起動時に Claude Buddy を直接動かすようにしたので要らない
+OBSOLETE = [
+    "wifi_event.py", "launcher.py", "launcher.mpy", "burst_frames.py", "burst_frames.mpy",
+    "buddy_state.py", "buddy_chars.py", "apps/claude_buddy.py", "apps/hello_cardputer.py", "apps/snake.py",
+]
 # viper を含むファイルは、アーキテクチャを指定しないと mpy-cross が "invalid arch" で失敗する
 NATIVE = {"voice.py": "xtensawin", "crypto.py": "xtensawin"}  # ESP32-S3
 PLAIN = [f for f in push.DEFAULT_FILES if f not in COMPILED]

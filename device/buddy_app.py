@@ -1,6 +1,6 @@
 """Cardputer CLI Buddy の本体: buddyd と BLE / Wi-Fi でつなぎ、Claude Code の perm / ask に答え、プロンプトを送る。
 
-ランチャーから起動される apps/claude_buddy.py は、これを import して run() を呼ぶだけの小さな入口にしている。
+起動時に main.py が、これを import して run() を呼ぶ。
 .py を import 時にコンパイルすると、その作業領域で GC ヒープが IDF ヒープを取って伸びるので、本体は .mpy で入れる。
 
 プロトコルは PROTOCOL.md、鍵は /flash/cardbuddy.key（`buddy pair` が USB で書く）。
@@ -28,17 +28,10 @@ BLE で待ち受けつつ、/flash/cardbuddy_wifi.json があれば Wi-Fi にも
 
 ### 終了
 
-UIFlow 2.0 にはランチャーへ戻る API が無いので、upstream の他アプリと同じく
-`machine.reset()` で再起動して戻る。
+Q で `machine.reset()` し、アプリを起動し直す。シリアルから Ctrl-C を送ると、再起動せずに REPL に入る（開発用）。
 """
 
 import sys
-
-# ランチャーのアニメーション（約 10KB）は、アプリの起動後は使わないので手放す。
-# GC ヒープに空きが無いと、伸びるときに IDF ヒープの最大ブロックを丸ごと取り、Wi-Fi のメモリが尽きる
-sys.modules.pop("burst_frames", None)
-if "launcher" in sys.modules:
-    sys.modules["launcher"]._burst = None
 
 import voice
 
@@ -129,6 +122,7 @@ def run():
     kb = MatrixKeyboard()
     time.sleep_ms(400)
 
+    reboot = True
     try:
         while True:
             if conn[1]:
@@ -153,6 +147,9 @@ def run():
             # 録音中や送信待ちがある間は、送信を詰まらせないよう短い間隔で回す
             busy = vo.state in ("rec", "flush") or not ble.tx_idle() or not wifi.tx_idle()
             time.sleep_ms(5 if busy else 40)
+    except KeyboardInterrupt:
+        reboot = False  # シリアルの Ctrl-C は REPL に入るため（開発用）。再起動すると、またこのアプリが動く
+        raise
     except Exception as e:
         # finally の reset が先に走ると traceback が出ないまま再起動し、原因が追えないので先に出す
         sys.print_exception(e)
@@ -177,5 +174,6 @@ def run():
         except Exception as e:
             print("claude_buddy: screen-clear warning:", e)
         time.sleep_ms(200)
-        machine.reset()
+        if reboot:
+            machine.reset()
 

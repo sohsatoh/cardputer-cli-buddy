@@ -151,3 +151,55 @@ def test_seal_into_matches_seal_bytes(n):
     ref = c.Session(enc, mac, c.DIR_D2H)
     ref.seal_bytes(pt, c.AUDIO)
     assert bytes(s.seal_into(pt, c.AUDIO, bufs)) == ref.seal_bytes(pt, c.AUDIO)  # バッファを使い回しても同じ
+
+
+class _ZeroingAes:
+    """IDF ヒープが尽きたときの AES。失敗すると出力を 0 で埋めて返す（実機で、平文のまま MAC の通る行が出た）。"""
+
+    def __init__(self, key, mode):
+        pass
+
+    def encrypt(self, data, out=None):
+        out = bytearray(len(data)) if out is None else out
+        out[:] = bytes(len(data))
+        return out
+
+
+def _broken_aes(real, from_block, how):
+    """from_block 番目以降のブロックで失敗する AES。how は zero（0 で埋める）か same（カウンタのまま返す）。"""
+
+    class Aes:
+        def __init__(self, key, mode):
+            self._a = real(key, mode)
+
+        def encrypt(self, data, out=None):
+            src = bytes(data)
+            r = self._a.encrypt(data, out)
+            o = 16 * from_block
+            r[o:] = bytes(len(src) - o) if how == "zero" else src[o:]
+            return r
+
+    return Aes
+
+
+@pytest.mark.parametrize("how", ["zero", "same"])
+@pytest.mark.parametrize("from_block", [0, 1, 3])
+def test_seal_refuses_partly_failed_keystream(monkeypatch, from_block, how):
+    _, dev = sessions()
+    monkeypatch.setattr(c, "aes", _broken_aes(c.aes, from_block, how))
+    with pytest.raises(c.FrameError):
+        dev.seal({"t": "voice_cancel", "vid": "55f83072", "pad": "x" * 60})  # 5 ブロック以上
+    with pytest.raises(c.FrameError):
+        dev.seal_into(b"\x00\x01" + bytes(100), c.AUDIO, c.seal_buffers(102))
+
+
+def test_seal_refuses_when_aes_returns_no_keystream(monkeypatch):
+    _, dev = sessions()
+    monkeypatch.setattr(c, "aes", _ZeroingAes)
+    msg = {"t": "voice_cancel", "vid": "55f83072"}
+    with pytest.raises(c.FrameError):
+        dev.seal(msg)
+    with pytest.raises(c.FrameError):
+        dev.seal_into(b"\x00\x01" + bytes(100), c.AUDIO, c.seal_buffers(102))
+    monkeypatch.undo()
+    assert host.Session(*c.hkdf(KEY, NH, ND), c.DIR_H2D).open(dev.seal(msg)) == msg  # 次の行は通る

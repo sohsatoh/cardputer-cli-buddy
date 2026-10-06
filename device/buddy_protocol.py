@@ -376,6 +376,10 @@ class Protocol:
         """
         if self.session is None:
             return None
-        if bufs is not None:
-            return self.session.seal_into(pt, crypto.AUDIO, bufs)
-        return self.session.seal_bytes(pt, crypto.AUDIO)
+        try:
+            if bufs is not None:
+                return self.session.seal_into(pt, crypto.AUDIO, bufs)
+            return self.session.seal_bytes(pt, crypto.AUDIO)
+        except crypto.FrameError as e:
+            print("buddy_protocol: seal failed:", e)
+            return None

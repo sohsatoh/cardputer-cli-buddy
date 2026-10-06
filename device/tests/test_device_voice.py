@@ -15,9 +15,11 @@ class FakeMic:
     def __init__(self, log):
         self.q = []
         self.log = log
+        self.broken = False  # IDF ヒープが足りず、I2S を始められない
 
     def begin(self):
         self.log.append("mic.begin")
+        return not self.broken
 
     def end(self):
         assert not self.q, "録音中のバッファを残したまま end しない"
@@ -25,7 +27,10 @@ class FakeMic:
 
     def record(self, buf, rate):
         assert rate == 16000 and len(buf) == 3200 and len(self.q) < 2  # M5Unified のキューは 2 面
+        if self.broken:
+            return False
         self.q.append(buf)
+        return True
 
     def isRecording(self):
         return len(self.q)
@@ -200,6 +205,57 @@ def test_stop_sends_everything_then_voice_end_and_deletes_spool(env):
     assert not spool(voice)
 
 
+def test_frame_that_cannot_be_sealed_is_retried(env, monkeypatch):
+    voice, d, v, mic, log, link = env
+    vid = start(d, v, link)
+    link.idle = False
+    for _ in range(3):
+        mic.finish()
+        v.service(link)
+    v.stop()
+    mic.finish()
+    mic.finish()
+    seal = d.p.seal_audio
+    monkeypatch.setattr(d.p, "seal_audio", lambda pt, bufs=None: None)  # 暗号化に失敗した
+    link.idle = True
+    for _ in range(3):
+        v.service(link)
+    assert link.lines == [] and v._sent == 0 and v.state == "flush"
+    monkeypatch.setattr(d.p, "seal_audio", seal)
+    for _ in range(10):
+        v.service(link)
+    assert [s for s, _ in audio(link)] == list(range(5)) and v.state == "wait"
+    assert d.replies() == [{"t": "voice_end", "vid": vid}]
+
+
+def test_audio_buffer_is_not_reused_while_another_link_holds_the_line(env):
+    """seal_audio の行は共有バッファを指す。積んだリンクが送り終える前に別のリンクで seal すると、
+    送りかけの行が書き換わり、相手は壊れた行（bad base64）を受け取る（実機）。"""
+    voice, d, v, mic, log, wifi = env
+    ble = FakeLink()
+    start(d, v, wifi)
+    ble.host = d.host
+    wifi.idle = ble.idle = False
+    for _ in range(3):
+        mic.finish()
+        v.service(wifi)
+    v.stop()
+    mic.finish()
+    mic.finish()
+    wifi.idle = True
+    v.service(wifi)
+    assert v._sent == 1
+    wifi.idle = False  # 1 行目を送りかけのまま、リンクが BLE に替わった
+    ble.idle = True
+    for _ in range(3):
+        v.service(ble)
+    assert ble.lines == [] and v._sent == 1
+    wifi.idle = True  # 送り終えた（または閉じてキューを捨てた）
+    for _ in range(10):
+        v.service(ble)
+    assert [s for s, _ in audio(wifi) + audio(ble)] == list(range(5))
+
+
 def test_cancel_stops_mic_sends_voice_cancel_and_deletes_spool(env):
     voice, d, v, mic, log, link = env
     vid = start(d, v, link)
@@ -266,6 +322,28 @@ def test_memory_error_at_startup_disables_voice(env, monkeypatch):
     v2 = voice.Voice(d.p)
     assert v2.start("ja-JP") is False
     assert v2.state == "idle" and "メモリ" in v2.err and d.sent == [] and log == []
+
+
+def test_mic_that_does_not_start_is_reported(env):
+    """IDF ヒープが足りないと I2S が始まらず、録音のキューに積めない（実機で isRecording() が 0）。
+
+    そのまま進むと、待ちのバッファを空のまま取り出し続け、無音のフレームを実時間より速く作る。
+    """
+    voice, d, v, mic, log, link = env
+    mic.broken = True
+    assert v.start("ja-JP") is False
+    assert v.state == "idle" and "メモリ" in v.err and log == ["mic.begin", "mic.end"] and not spool(voice)
+    vid = d.replies()[0]["vid"]
+    mic.broken = False
+    assert v.start("ja-JP") is True and v.vid != vid
+
+
+def test_mic_failure_cancels_the_begun_recording(env):
+    voice, d, v, mic, log, link = env
+    mic.broken = True
+    v.start("en-US")
+    msgs = d.replies()
+    assert [m["t"] for m in msgs] == ["voice_begin", "voice_cancel"] and msgs[0]["vid"] == msgs[1]["vid"]
 
 
 def test_flash_full_does_not_start(env, monkeypatch):

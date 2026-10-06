@@ -411,7 +411,7 @@ def test_tcp_send_waits_while_idf_heap_is_low(env, monkeypatch):
     up_to_scan(wl, net, clock)
     s = open_tcp(wl, net, clock)
     rx = hello(wl, s)
-    esp.free = [5_000, 2_000]  # 合計がしきい値未満
+    esp.free = [3_000, 500]  # 合計が下限未満
     wl.enqueue(b"y" * 50 + b"\n")
     wl.service()
     assert s.out == b"" and not wl.tx_idle() and wl.state == "open"
@@ -419,6 +419,40 @@ def test_tcp_send_waits_while_idf_heap_is_low(env, monkeypatch):
     wl.service()
     assert s.out == b"y" * 50 + b"\n" and wl.tx_idle()
     assert rx is not None
+
+
+def test_tcp_send_trickles_while_idf_heap_is_short(env, monkeypatch):
+    """空きが下限としきい値の間なら、小分けにして送り続ける。
+
+    Wi-Fi は受信の後などに IDF ヒープを数十秒抱え、空きが 8KB の少し下で止まることがある（実機）。
+    そこで全部止めると、buddyd が 40 秒で切り、再接続の Hello も送れなくなる。
+    """
+    wifi_link, net, clock, d, cfg = env
+    esp = FakeEsp32()
+    monkeypatch.setattr(wifi_link, "esp32", esp)
+    wl = wifi_link.WifiLink(d.p, cfg)
+    up_to_scan(wl, net, clock)
+    s = open_tcp(wl, net, clock)
+    hello(wl, s)
+    sizes = []
+    send = s.send
+
+    def spy(mv):
+        sizes.append(len(mv))
+        return send(mv)
+
+    s.send = spy
+    esp.free = [wifi_link.IDF_FLOOR_FREE, 2_000, 1_900]  # 合計はしきい値未満、下限以上
+    line = b"w" * 3000 + b"\n"
+    wl.enqueue(line)
+    wl.service()
+    assert s.out == line and wl.tx_idle()
+    assert max(sizes) <= wifi_link.TRICKLE
+    sizes.clear()
+    esp.free = [wifi_link.IDF_FLOOR_BLOCK - 1] * 5  # 合計はあるが、連続した領域が下限未満
+    wl.enqueue(b"v" * 10 + b"\n")
+    wl.service()
+    assert sizes == [] and not wl.tx_idle()
 
 
 def test_tcp_send_waits_while_idf_heap_is_fragmented(env, monkeypatch):
@@ -429,11 +463,11 @@ def test_tcp_send_waits_while_idf_heap_is_fragmented(env, monkeypatch):
     up_to_scan(wl, net, clock)
     s = open_tcp(wl, net, clock)
     hello(wl, s)
-    esp.free = [3_000] * 10  # 合計は多いが、連続した領域が小さい
+    esp.free = [1_500] * 10  # 合計は多いが、連続した領域が小さい
     wl.enqueue(b"z" * 50 + b"\n")
     wl.service()
     assert s.out == b""
-    esp.free = [3_000] * 9 + [wifi_link.IDF_MIN_BLOCK]
+    esp.free = [1_500] * 9 + [wifi_link.IDF_MIN_BLOCK]
     wl.service()
     assert s.out == b"z" * 50 + b"\n"
 

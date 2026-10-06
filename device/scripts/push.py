@@ -42,21 +42,14 @@ except ImportError:
 # "no such file or directory".
 DEFAULT_FILES = [
     "main.py",
-    "launcher.py",
     "buddy_ble.py",
     "buddy_ui_cp.py",
-    "buddy_state.py",
-    "buddy_chars.py",
     "buddy_protocol.py",
     "crypto.py",
     "kana.py",
     "voice.py",
     "wifi_link.py",
     "buddy_app.py",
-    "burst_frames.py",
-    "apps/claude_buddy.py",
-    "apps/hello_cardputer.py",
-    "apps/snake.py",
 ]
 
 CHUNK_BYTES = 512  # source bytes per paste-mode write

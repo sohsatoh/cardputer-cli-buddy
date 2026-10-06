@@ -45,6 +45,24 @@ try:
             dst[i] = dst[i] ^ src[i]
 
     @micropython.viper
+    def _ks_bad(ks: ptr8, nb: int, head: ptr8) -> int:  # noqa: F821
+        # どれかのブロックが 0 か、入力のカウンタブロック（head 12 byte + ブロック番号）のままなら 1
+        for b in range(nb):
+            o = b * 16
+            z = 0
+            d = 0
+            for j in range(16):
+                v = ks[o + j]
+                z |= v
+                if j < 12:
+                    d |= v ^ head[j]
+                else:
+                    d |= v ^ ((b >> (8 * (15 - j))) & 0xFF)
+            if z == 0 or d == 0:
+                return 1
+        return 0
+
+    @micropython.viper
     def _b64_into(src: ptr8, n: int, dst: ptr8, tbl: ptr8) -> int:  # noqa: F821
         i = 0
         j = 0
@@ -81,6 +99,13 @@ except Exception:  # CPython（テスト）には viper が無い
     def _xor(dst, src, n):
         for i in range(n):
             dst[i] ^= src[i]
+
+    def _ks_bad(ks, nb, head):
+        for b in range(nb):
+            blk = bytes(ks[16 * b : 16 * b + 16])
+            if blk == bytes(16) or blk == bytes(head[:12]) + struct.pack(">I", b):
+                return 1
+        return 0
 
     def _b64_into(src, n, dst, tbl):
         b = binascii.b2a_base64(bytes(src[:n]))
@@ -170,6 +195,10 @@ def _ctr(enc_key, d, ctr, data, blk=None):
     if n:
         ks = memoryview(blk)[: 16 * n]
         aes(enc_key, _ECB).encrypt(ks, ks)
+        if _ks_bad(blk, n, head):
+            # IDF ヒープが尽きると AES は失敗して出力を 0 で埋めたまま返り、平文がそのまま MAC 付きで出た（実機）。
+            # 途中のブロックから失敗しても、暗号化されていないブロックを 1 つも送らない
+            raise FrameError("aes failed")
         _xor(blk, data, len(data))
     return blk
 

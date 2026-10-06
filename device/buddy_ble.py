@@ -97,9 +97,9 @@ def _mac_suffix(mac_bytes: bytes) -> str:
 # Stack-level state is cached for the lifetime of the MicroPython
 # process because NimBLE on UIFlow 2.0 cannot re-register GATT services
 # on an already-active stack: the second gatts_register_services call
-# returns OSError(16) EBUSY. The app layer enters/exits Buddy many
-# times per boot (launcher → Buddy → back → Buddy), so each entry must
-# reuse the previously-registered service handles rather than trying to
+# returns OSError(16) EBUSY. If the app is started again in the same
+# process (e.g. from the REPL after Ctrl-C), it must reuse the
+# previously-registered service handles rather than trying to
 # re-register. active(False)/active(True) was tried as a reset path but
 # crashes the BLE controller with "BLE_INIT: controller init failed",
 # so it's avoided here too — the singleton is the only clean option.
@@ -153,9 +153,9 @@ def _ensure_stack(name_prefix: str):
     # window in our testing.
     time.sleep_ms(300)
 
-    # The launcher and other apps may have left the stack in various
-    # states; only call active(True) if it isn't already, since the
-    # init transition is what tends to wedge the controller.
+    # main.py normally activates the stack before the app is imported;
+    # only call active(True) if it isn't already, since the init
+    # transition is what tends to wedge the controller.
     try:
         pre_active = ble.active()
     except Exception:
@@ -258,8 +258,8 @@ class BuddyBLE:
         self._current_passkey = None
         # Flipped by deinit(). _irq checks this before dispatching so
         # that a late async event (e.g. the DISCONNECT that fires after
-        # we've already returned to the launcher) can't repaint stale
-        # UI or re-arm advertising on an app that's on its way out.
+        # the app has started shutting down) can't repaint stale UI or
+        # re-arm advertising on an app that's on its way out.
         self._shutting_down = False
 
         # Rebinding the IRQ callback replaces any handler from a
@@ -315,9 +315,9 @@ class BuddyBLE:
 
     def _irq(self, event, data):
         if self._shutting_down:
-            # App is tearing down — the main loop has already returned
-            # and the launcher may be mid-repaint. Don't dispatch any
-            # callback or schedule work; just swallow the event.
+            # App is tearing down — the main loop has already returned.
+            # Don't dispatch any callback or schedule work; just
+            # swallow the event.
             return
         if event == _IRQ_CENTRAL_CONNECT:
             conn, _addr_type, _addr = data
@@ -435,8 +435,8 @@ class BuddyBLE:
         fine, so walk up a staircase of delays (150/300/450/600/750
         ms, ~2.25s total) before giving up. If we still can't get
         back to advertising after that, leaving the device dark is
-        less bad than crashing — the user can power-cycle, and the
-        other apps on the launcher still work.
+        less bad than crashing — the user can press Q (reboot) or
+        power-cycle.
         """
         for attempt in range(5):
             if self._paused:
@@ -608,8 +608,8 @@ class BuddyBLE:
     def deinit(self):
         """Stop advertising and drop any active link.
 
-        Called by the app layer when the user exits back to the
-        launcher. We keep the BLE stack itself alive (active(False)
+        Called by the app layer when it exits (Q reboots the device;
+        Ctrl-C on the serial port drops into the REPL). We keep the BLE stack itself alive (active(False)
         tends to leave the controller in a weird state that needs a
         reboot to recover) and just shut down our surface: stop
         advertising and drop the current link if any.
@@ -617,10 +617,10 @@ class BuddyBLE:
         Order matters: neutralize the IRQ path *before* disconnecting.
         gap_disconnect is asynchronous — the DISCONNECT event fires
         milliseconds later, long after this method (and buddy_app)
-        have returned and the launcher has started repainting. If our
-        handler is still wired up when that event lands, it'll fire
-        _on_state("disconnected") → set_connection → _draw_header /
-        _draw_main, which paints Buddy chrome on top of the launcher.
+        have returned. If our handler is still wired up when that event
+        lands, it'll fire _on_state("disconnected") → set_connection →
+        _draw_header / _draw_main, which repaints Buddy chrome after the
+        app has exited.
 
         We use three layers of defense, because the stripped UIFlow
         BLE stack has surprised us before:

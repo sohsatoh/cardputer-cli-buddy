@@ -22,10 +22,13 @@ under the Apache License, Version 2.0.
 
 Modifications by the Cardputer CLI Buddy project: the Hardware Buddy
 protocol (`buddy_protocol.py`) was replaced with the encrypted protocol
-described in `PROTOCOL.md`, `crypto.py`, `kana.py`, `scripts/deploy.py`
-and `tests/` were added, and
-`buddy_ble.py`, `buddy_ui_cp.py`, `apps/claude_buddy.py` and
-`scripts/push.py` were changed accordingly.
+described in `PROTOCOL.md`, `crypto.py`, `kana.py`, `voice.py`, `wifi_link.py`,
+`buddy_app.py`, `scripts/deploy.py` and `tests/` were added, and
+`buddy_ble.py`, `buddy_ui_cp.py`, `main.py` and `scripts/push.py` were
+changed accordingly. `main.py` starts the app directly instead of showing a
+launcher; the launcher (`launcher.py`, `burst_frames.py`,
+`scripts/gen_burst_frames.py`), `buddy_state.py`, `buddy_chars.py` and the
+apps under `apps/` were removed.
 The pyserial copy under `onboard/scripts/vendor/` mentioned above (and in
 LICENSE-THIRD-PARTY.md) is not included in this directory; `scripts/` uses
 an installed pyserial instead.

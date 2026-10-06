@@ -35,15 +35,28 @@ _EAGAIN = 11
 _EINPROGRESS = (115, 119)
 
 
-def _idf_low():
+# しきい値を切っても、下限までは TRICKLE byte ずつ送る。Wi-Fi は受信の後などに IDF ヒープを数十秒抱え、
+# 空きがしきい値の少し下で止まることがある（実機で 7.8KB）。そこで全部止めると、buddyd が無通信で切り、
+# 再接続の Hello も送れなくなる
+IDF_FLOOR_FREE = 4 * 1024
+IDF_FLOOR_BLOCK = 2 * 1024
+TRICKLE = 512
+
+
+def _idf_room():
+    """今 TCP に書いてよい byte 数。None なら制限なし、0 なら書かない。"""
     if esp32 is None:
-        return False
+        return None
     free = big = 0
     for h in esp32.idf_heap_info(esp32.HEAP_DATA):
         free += h[1]
         if h[2] > big:
             big = h[2]
-    return free < IDF_MIN_FREE or big < IDF_MIN_BLOCK
+    if free >= IDF_MIN_FREE and big >= IDF_MIN_BLOCK:
+        return None
+    if free >= IDF_FLOOR_FREE and big >= IDF_FLOOR_BLOCK:
+        return TRICKLE
+    return 0
 
 
 def arbitrate(proto, ble, wifi):
@@ -282,8 +295,11 @@ class WifiLink:
     def _write(self, mv):
         if self._sock is None:
             raise OSError(107)  # ENOTCONN
-        if _idf_low():
+        room = _idf_room()
+        if room == 0:
             return 0
+        if room is not None:
+            mv = mv[:room]
         try:
             return self._sock.send(mv)
         except OSError as e:
