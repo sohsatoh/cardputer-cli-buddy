@@ -17,10 +17,12 @@ PERM_IDLE = 60.0
 MAX_N = 9
 STATES = ("running", "idle")
 PROMPT_MAX = 500
+ANSWER_TEXT_MAX = 500
 # ponytail: 結果は件数で古い順に捨てる、perm hook が 25 秒ごとに取りに来る前提で十分な数
 MAX_RESULTS = 256
 LOG_KEEP, LOG_TEXT_MAX, LOG_CHUNK = 20, 4000, 500
 ROLES = {"user": "u", "assistant": "a"}
+ACTIVITY_KEEP = 200
 
 
 def trunc(s: str, n: int) -> str:
@@ -37,11 +39,19 @@ def perm_hint(tool: str, inp: dict) -> str:
 
     if tool == "Bash" and has("command"):
         return inp["command"]
+    # 印を先頭の行にだけ付けると、new_string の中の "- " 行が削除される行に見えてしまうので全行に付ける
+    # パスの改行も、見出しや差分の行を偽造できないよう \n と書く
+    def mark(sign, text):
+        return "\n".join(f"{sign} {line}" for line in text.split("\n"))
+
+    def path():
+        return inp["file_path"].replace("\n", "\\n")
+
     if tool == "Edit" and has("file_path", "old_string", "new_string"):
-        head = inp["file_path"] + (" (replace_all)" if inp.get("replace_all") is True else "")
-        return f"{head}\n- {inp['old_string']}\n+ {inp['new_string']}"
+        head = path() + (" (replace_all)" if inp.get("replace_all") is True else "")
+        return f"{head}\n{mark('-', inp['old_string'])}\n{mark('+', inp['new_string'])}"
     if tool == "Write" and has("file_path", "content"):
-        return f"{inp['file_path']}\n{inp['content']}"
+        return f"{path()}\n{mark('+', inp['content'])}"
     return _json(inp)
 
 
@@ -69,6 +79,7 @@ class SessionTable:
         self.reqs: dict[str, dict] = {}  # req -> {sid, kind, fields, qs | key, waiters, idle_since}
         self.queues: dict[str, list] = {}
         self.logs: dict[str, deque] = {}
+        self.activities: dict[str, deque] = {}  # 最新のターンの activity（受信時刻 at つき）
         self.perm_results: dict[str, dict] = {}  # 解決済み perm の {decision} / {released}
 
     def upsert(self, sid: str, cwd: str, title: str, state: str, now: float) -> int | None:
@@ -77,6 +88,7 @@ class SessionTable:
             s = self.sessions[sid] = {"n": None}
             self.queues[sid] = []
             self.logs[sid] = deque(maxlen=LOG_KEEP)
+            self.activities[sid] = deque(maxlen=ACTIVITY_KEEP)
         if s["n"] is None:
             used = {x["n"] for x in self.sessions.values()}
             s["n"] = next((n for n in range(1, MAX_N + 1) if n not in used), None)
@@ -88,6 +100,7 @@ class SessionTable:
             return []
         self.queues.pop(sid, None)
         self.logs.pop(sid, None)
+        self.activities.pop(sid, None)
         out = []
         for req in [r for r, v in self.reqs.items() if v["sid"] == sid]:
             out += self.resolve(req, "abort")
@@ -217,6 +230,24 @@ class SessionTable:
         if sid in self.logs and text:
             self.logs[sid].append({"r": ROLES[role], "x": trunc(text, LOG_TEXT_MAX)})
 
+    def add_activity(self, sid: str, ev: dict, now: float) -> dict | None:
+        acts = self.activities.get(sid)
+        if acts is None:
+            return None
+        if ev["type"] == "turn_start":
+            acts.clear()
+        item = {"at": now, **ev}
+        acts.append(item)
+        return item
+
+    def activity(self, sid: str) -> list[dict]:
+        return list(self.activities.get(sid, ()))
+
+    def running_tools(self, sid: str) -> list[dict]:
+        acts = self.activities.get(sid, ())
+        ended = {a["tool_use_id"] for a in acts if a["type"] == "tool_end"}
+        return [a for a in acts if a["type"] == "tool_start" and a["tool_use_id"] not in ended]
+
     def pop_events(self, sid: str) -> list[dict]:
         q = self.queues.get(sid)
         if not q:
@@ -300,10 +331,24 @@ class SessionTable:
         return []
 
 
+def _valid_text(v) -> bool:
+    if not isinstance(v, str) or not 0 < len(v) <= ANSWER_TEXT_MAX:
+        return False
+    try:
+        v.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _valid_answers(answers, qs) -> bool:
     if not isinstance(answers, list) or len(answers) != len(qs):
         return False
     for a, q in zip(answers, qs):
+        if isinstance(a, dict):
+            if set(a) != {"text"} or not _valid_text(a["text"]):
+                return False
+            continue
         if not isinstance(a, list) or not a or len(set(map(repr, a))) != len(a):
             return False
         if not q["m"] and len(a) != 1:

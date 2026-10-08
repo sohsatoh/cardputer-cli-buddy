@@ -115,6 +115,42 @@ test('AskUserQuestion はデバイスの index 回答をラベルに変換して
   })
 })
 
+test('AskUserQuestion の自由入力 {text} はそのまま回答の文字列にする', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => {}))
+  await start($)
+  await clock.advance(0)
+
+  const call = $.tool.call({ tool: 'AskUserQuestion', questions: QUESTIONS })
+  await clock.advance(0)
+  b.push({ type: 'ask_reply', req: 'r1', answers: [{ text: '別の案で' }, { text: 'Go, Zig' }] })
+  const r = await call
+  expect(r.result).toEqual({
+    questions: QUESTIONS,
+    answers: { 'どれにする？': '別の案で', 'どれを使う？': 'Go, Zig' },
+  })
+})
+
+test('空や長すぎる自由入力は捨てて端末を待ち続ける', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  let answer: ((v: { result: unknown; text: string }) => void) | undefined
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(r => (answer = r)))
+  await start($)
+  await clock.advance(0)
+
+  const call = $.tool.call({ tool: 'AskUserQuestion', questions: QUESTIONS })
+  await clock.advance(0)
+  b.push({ type: 'ask_reply', req: 'r1', answers: [{ text: '' }, [0]] })
+  b.push({ type: 'ask_reply', req: 'r1', answers: [{ text: 'x'.repeat(501) }, [0]] })
+  await clock.advance(0)
+  answer?.({ result: { questions: QUESTIONS, answers: { 'どれにする？': 'A' } }, text: 't' })
+  expect((await call).text).toBe('t')
+})
+
 test('AskUserQuestion で端末が先に答えたら resolved{terminal} を送り、端末の結果を返す', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/h' })
@@ -266,14 +302,129 @@ test('main loop のターンの answer だけを assistant として /log に送
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/h' })
   const b = fakeBuddyd(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   await start($)
   await clock.advance(0)
 
+  await $.turn.start({ text: 'p', turnId: 't1' })
   const base = { durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' as const }
   await $.turn.complete({ ...base, answer: '直しました' })
   await $.turn.complete({ ...base, answer: 'subagent の答え', agentId: 'a1' })
   await $.turn.complete({ ...base, answer: '' })
   await clock.advance(0)
   expect(b.posted('/log').map(s => s.body)).toEqual([{ sid: SID, role: 'assistant', text: '直しました' }])
+})
+
+const activities = (b: ReturnType<typeof fakeBuddyd>) =>
+  b.posted('/activity').map(s => s.body as { sid: string; ev: Record<string, unknown> })
+
+test('turn_start は prompt を 80 文字（コードポイント）で切り、subagent の turn_end には agent_id を付ける', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  on('agent.list', () => ({ value: [{ id: 'ag1', type: 'Explore', description: 'd', status: 'running' }] }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await start($)
+  await clock.advance(0)
+
+  await $.turn.start({ text: 'あ'.repeat(79) + '😀z', turnId: 't1' })
+  const base = { answer: 'a', durationMs: 1234, isAborted: false, reason: 'answer' as const }
+  await $.turn.complete({ ...base, turnId: 'sub', agentId: 'ag1' })
+  await $.turn.complete({ ...base, turnId: 't1' })
+  await clock.advance(0)
+  expect(activities(b)).toEqual([
+    { sid: SID, ev: { type: 'turn_start', turn_id: 't1', prompt: 'あ'.repeat(79) + '😀' } },
+    { sid: SID, ev: { type: 'turn_end', turn_id: 'sub', reason: 'answer', ms: 1234, agent_id: 'ag1', agent_type: 'Explore' } },
+    { sid: SID, ev: { type: 'turn_end', turn_id: 't1', reason: 'answer', ms: 1234 } },
+  ])
+})
+
+test('tool_start / tool_end を送り、Bash は command 先頭 120 文字、ファイル系は file_path を要約にする', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  on('tool.call', (_$, e) =>
+    e.tool === 'Write' ? { isError: true as const, result: 'x', text: 'x' } : { result: 'ok', text: 'ok' },
+  )
+  await start($)
+  await clock.advance(0)
+
+  await $.tool.call({ tool: 'Bash', command: 'x'.repeat(130) })
+  await $.tool.call({ tool: 'Write', file_path: '/w/a.txt', content: 'c' })
+  await $.tool.call({ tool: 'CronList' })
+  await clock.advance(0)
+  const evs = activities(b).map(a => a.ev)
+  expect(evs.filter(e => e.type === 'tool_start').map(({ tool_use_id: _, ...rest }) => rest)).toEqual([
+    { type: 'tool_start', tool: 'Bash', summary: 'x'.repeat(120) },
+    { type: 'tool_start', tool: 'Write', summary: '/w/a.txt' },
+    { type: 'tool_start', tool: 'CronList' },
+  ])
+  const ends = evs.filter(e => e.type === 'tool_end')
+  expect(ends.map(e => e.is_error)).toEqual([false, true, false])
+  expect(ends.every(e => typeof e.ms === 'number' && e.ms >= 0)).toBe(true)
+  const starts = evs.filter(e => e.type === 'tool_start')
+  expect(ends.map(e => e.tool_use_id)).toEqual(starts.map(e => e.tool_use_id))
+  expect(typeof starts[0]?.tool_use_id).toBe('string')
+})
+
+test('subagent のツールには agent_id と、分かれば agent_type を付ける', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  let lists = 0
+  on('agent.list', () => (lists++, { value: [{ id: 'ag1', type: 'Explore', description: 'd', status: 'running' }] }))
+  on('tool.call', () => ({ result: 'ok', text: 'ok' }))
+  await start($)
+  await clock.advance(0)
+
+  const call = (agentId: string) => $.tool.call({ tool: 'Read', file_path: '/w/a', agentId } as never)
+  await call('ag1')
+  await call('ag1')
+  await call('ag9')
+  await clock.advance(0)
+  const starts = activities(b).map(a => a.ev).filter(e => e.type === 'tool_start')
+  expect(starts.map(e => [e.agent_id, e.agent_type])).toEqual([['ag1', 'Explore'], ['ag1', 'Explore'], ['ag9', undefined]])
+  expect(lists).toBe(2)
+})
+
+test('AskUserQuestion も activity に出し、tool_done は送らない', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  on('tool.call', { tool: 'AskUserQuestion' }, () => ({ result: 'terminal', text: 'terminal' }))
+  await start($)
+  await clock.advance(0)
+
+  await $.tool.call({ tool: 'AskUserQuestion', questions: QUESTIONS })
+  await clock.advance(0)
+  expect(activities(b).map(a => [a.ev.type, a.ev.tool ?? a.ev.is_error])).toEqual([
+    ['tool_start', 'AskUserQuestion'],
+    ['tool_end', false],
+  ])
+  expect(b.posted('/tool_done')).toEqual([])
+})
+
+test('turn.start で始まっていないターン（agentId の無い背景 subagent）は main として扱わない', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await start($)
+  await clock.advance(0)
+
+  await $.turn.start({ text: 'main', turnId: 'm1' })
+  const base = { durationMs: 5, isAborted: false, reason: 'answer' as const }
+  await $.turn.complete({ ...base, answer: 'subagent の答え', turnId: 'bg1' })
+  await clock.advance(0)
+  expect(b.posted('/session').at(-1)?.body).toMatchObject({ state: 'running' })
+  expect(b.posted('/log')).toEqual([])
+  expect(activities(b).at(-1)?.ev).toEqual({ type: 'turn_end', turn_id: 'bg1', reason: 'answer', ms: 5 })
+
+  await $.turn.complete({ ...base, answer: 'main の答え', turnId: 'm1' })
+  await clock.advance(0)
+  expect(b.posted('/session').at(-1)?.body).toMatchObject({ state: 'idle' })
+  expect(b.posted('/log').map(s => s.body)).toEqual([{ sid: SID, role: 'assistant', text: 'main の答え' }])
 })

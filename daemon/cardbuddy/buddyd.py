@@ -40,6 +40,22 @@ class Hub:
         self.wake_event = asyncio.Event()
         self._kick = asyncio.Event()
         self._last_sessions = None
+        self._activity_subs: list = []
+
+    def subscribe_activity(self, cb):
+        """cb(sid, item) を新しい activity ごとに呼ぶ。戻り値を呼ぶと購読をやめる。"""
+        self._activity_subs.append(cb)
+        return lambda: self._activity_subs.remove(cb)
+
+    def publish_activity(self, sid: str, item: dict):
+        for cb in list(self._activity_subs):
+            try:
+                cb(sid, item)
+            except Exception:
+                log.exception("activity subscriber failed")
+
+    def activity(self, sid: str) -> dict:
+        return {"events": self.table.activity(sid), "running": self.table.running_tools(sid)}
 
     def send(self, msgs: list[dict]):
         for m in msgs:

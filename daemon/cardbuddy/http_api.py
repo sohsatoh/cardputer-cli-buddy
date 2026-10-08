@@ -20,6 +20,15 @@ MAX_HEADERS = 100
 READ_TIMEOUT = 10.0
 # クライアント側の $.http.fetch が 30 秒で打ち切るため、待ちは必ずそれより前に返す
 WAIT_DEFAULT = WAIT_MAX = 25
+# type ごとのフィールド: (型, 最大長, 必須)。文字列は空を許さない（prompt だけは続きのターンで空になる）
+ACTIVITY_FIELDS = {
+    "turn_start": {"turn_id": (str, 64, True), "prompt": (str, 80, True)},
+    "turn_end": {"turn_id": (str, 64, True), "reason": (str, 32, True), "ms": (int, None, True),
+                 "agent_id": (str, 64, False), "agent_type": (str, 128, False)},
+    "tool_start": {"tool_use_id": (str, 128, True), "tool": (str, 128, True), "summary": (str, 1024, False),
+                   "agent_id": (str, 64, False), "agent_type": (str, 128, False)},
+    "tool_end": {"tool_use_id": (str, 128, True), "is_error": (bool, None, True), "ms": (int, None, True)},
+}
 
 
 class HttpError(Exception):
@@ -62,6 +71,25 @@ def _input(body: dict) -> dict:
     if not isinstance(v, dict) or not _is_text(json.dumps(v, ensure_ascii=False)):
         raise HttpError(400, "bad input")
     return v
+
+
+def _activity(ev) -> dict:
+    fields = ACTIVITY_FIELDS.get(ev.get("type")) if isinstance(ev, dict) else None
+    if fields is None:
+        raise HttpError(400, "bad ev")
+    out = {"type": ev["type"]}
+    for k, (typ, maxlen, required) in fields.items():
+        if k not in ev and not required:
+            continue
+        v = ev.get(k)
+        if typ is str:
+            ok = type(v) is str and _is_text(v) and len(v) <= maxlen and (v != "" or k == "prompt")
+        else:
+            ok = type(v) is typ and (typ is bool or v >= 0)
+        if not ok:
+            raise HttpError(400, f"bad ev.{k}")
+        out[k] = v
+    return out
 
 
 def _timeout(q: dict) -> float:
@@ -150,6 +178,12 @@ async def _route(hub, reader, method: str, target: str, body: dict):
             raise HttpError(400, "bad role")
         hub.table.add_log(_get(body, "sid", str, 128), role, _get(body, "text", str))
         hub.kick()
+        return {}
+    if p == "/activity":
+        sid, ev = _get(body, "sid", str, 128), _activity(body.get("ev"))
+        item = hub.table.add_activity(sid, ev, time.time())
+        if item is not None:
+            hub.publish_activity(sid, item)
         return {}
     if p == "/ack_prompt":
         sid = _session(hub, _get(body, "sid", str, 128))
