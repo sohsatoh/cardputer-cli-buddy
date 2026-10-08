@@ -158,6 +158,23 @@ make -C daemon/stt
 - No permission prompt appears: SpeechTranscriber uses neither the Speech Recognition privacy permission nor the Dictation setting (verified on macOS 26.5).
 - Once the model is installed, up to 60 s of audio is transcribed in about 1–2 s on Apple Silicon.
 
+### 8. Web UI for iPhone (optional)
+
+buddyd can also serve a web UI to an iPhone on the same LAN. Devices are authenticated with client certificates (mTLS) issued by a local CA.
+
+```sh
+uv --directory daemon run buddy web init            # local CA + server certificate (~/.cardbuddy/pki)
+uv --directory daemon run buddy web enroll iphone   # writes ~/Downloads/cardbuddy-iphone.mobileconfig
+launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd
+```
+
+- `enroll` prints the profile password only in the terminal. AirDrop the profile to the iPhone, install it, enter the password, and turn on full trust for "CardBuddy Local CA" in Settings > General > About > Certificate Trust Settings.
+- Open `https://<LocalHostName>.local:47825/` (or the IP shown by `buddy web devices`). Plain `http://` is redirected to `https://`.
+- **Scope of trust:** an iPhone that trusts this CA accepts any certificate it signs for `*.local`, `localhost`, and the private IP ranges (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16). The CA has name constraints for exactly these ranges, so it cannot vouch for other domains, but anyone holding the CA key could impersonate any LAN host to that iPhone.
+- The CA key is encrypted with a random passphrase kept in the macOS Keychain and is opened only by `buddy web init`, `enroll`, and `init --renew`. A CA key created before this was added is encrypted in place with `buddy web protect-ca` (the CA itself does not change).
+- `buddy web devices` lists enrolled devices and warns when the server certificate is about to expire or no longer covers the Mac's LAN IP; run `buddy web init --renew` then. `buddy web revoke <name>` takes effect without restarting buddyd.
+- macOS may ask whether to accept incoming connections for buddyd (Python). Allow it. Start buddyd with `--no-web` to turn the web UI off.
+
 ## Keys
 
 Pressed on their own, the Cardputer-Adv arrow keys type `;` `,` `.` `/`. Below, "↑↓" means either the bare `;` `.` keys or Fn+↑↓. Esc is the `` ` `` key.

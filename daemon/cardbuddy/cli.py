@@ -1,4 +1,4 @@
-"""buddy コマンド: pair / status / install-agent。"""
+"""buddy コマンド: pair / status / install-agent / web。"""
 
 import argparse
 import getpass
@@ -162,6 +162,65 @@ def install_agent(args) -> int:
     return 0
 
 
+def _to_terminal(line: str):
+    # PKCS#12 のパスワードは、標準出力がファイルやパイプにつながっていても端末にだけ出す
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(line + "\n")
+    except OSError:
+        raise SystemExit("buddy: the profile password can only be shown on a terminal; run this in Terminal") from None
+
+
+def _web_urls() -> list[str]:
+    from . import webpki
+    from .web import WEB_PORT
+    st = webpki.server_status()
+    return [f"https://{h}:{WEB_PORT}/" for h in [*[d for d in st["dns"] if d != "localhost"],
+                                                 *[i for i in st["ips"] if i != "127.0.0.1"]]]
+
+
+def web(args) -> int:
+    from . import webpki
+    if args.web_cmd == "init":
+        info = webpki.init(renew=args.renew)
+        print(f"server certificate for {info['host']} / {info['ip']} (expires {info['expires']:%Y-%m-%d}) "
+              f"written to {webpki.pki_dir()}")
+        print(f"restart buddyd to use it (launchctl kickstart -k gui/{os.getuid()}/{LABEL})")
+    elif args.web_cmd == "enroll" and args.pem:
+        crt, fp = webpki.enroll_pem(args.name)
+        key, ca = crt.with_suffix(".key"), webpki.pki_dir() / "ca.crt"
+        print(f"{args.name}: sha256={fp[:16]}…\n  cert: {crt}\n  key:  {key}")
+        print(f"  curl --cacert {ca} --cert {crt} --key {key} {_web_urls()[0]}")
+    elif args.web_cmd == "enroll":
+        path, fp, password = webpki.enroll(args.name, Path(args.out).expanduser())
+        print(f"profile: {path}\nsha256:  {fp[:16]}…")
+        _to_terminal(f"password (shown only here, not saved): {password}")
+        print("Send the profile to the iPhone (AirDrop), install it in Settings, and enter the password.\n"
+              "Then turn on full trust for \"CardBuddy Local CA\" in Settings > General > About > "
+              "Certificate Trust Settings, and open:")
+        for url in _web_urls():
+            print(f"  {url}")
+    elif args.web_cmd == "devices":
+        for d in webpki.devices():
+            print(f"  {d['name']:<16} sha256={d['fp'][:16]}…  expires {d['expires'] or '-'}")
+        st = webpki.server_status()
+        print(f"server certificate: expires {st['expires']:%Y-%m-%d} ({st['days_left']} days), "
+              f"names {', '.join(st['dns'] + st['ips'])}")
+        for w in st["warnings"]:
+            print(f"  warning: {w}")
+        for url in _web_urls():
+            print(f"  {url}")
+    elif args.web_cmd == "protect-ca":
+        done = webpki.protect_ca()
+        print(f"encrypted the CA key in {webpki.pki_dir()} with a passphrase stored in the Keychain"
+              if done else "the CA key is already encrypted")
+    else:
+        n = webpki.revoke(args.name)
+        print(f"revoked {n} certificate(s) for {args.name}" if n else f"no device named {args.name}")
+        return 0 if n else 1
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="buddy")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -171,5 +230,17 @@ def main(argv=None) -> int:
     p.add_argument("--wifi", action="store_true", help="also write Wi-Fi SSID / password (prompted) to the device")
     sub.add_parser("status", help="show buddyd status")
     sub.add_parser("install-agent", help="write the launchd LaunchAgent plist")
+    w = sub.add_parser("web", help="manage the mTLS certificates of the LAN web UI")
+    wsub = w.add_subparsers(dest="web_cmd", required=True)
+    wi = wsub.add_parser("init", help="create the local CA and the server certificate")
+    wi.add_argument("--renew", action="store_true", help="only reissue the server certificate (expiry or IP change)")
+    we = wsub.add_parser("enroll", help="issue a client certificate for a device")
+    we.add_argument("name")
+    we.add_argument("--out", default="~/Downloads", help="where to write the .mobileconfig (default: %(default)s)")
+    we.add_argument("--pem", action="store_true", help="write a PEM certificate and key for curl instead")
+    wsub.add_parser("devices", help="list enrolled devices and the server certificate status")
+    wsub.add_parser("protect-ca", help="encrypt a plaintext CA key with a passphrase kept in the Keychain")
+    wr = wsub.add_parser("revoke", help="revoke every certificate of a device")
+    wr.add_argument("name")
     args = ap.parse_args(argv)
-    return {"pair": pair, "status": status, "install-agent": install_agent}[args.cmd](args)
+    return {"pair": pair, "status": status, "install-agent": install_agent, "web": web}[args.cmd](args)

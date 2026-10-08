@@ -158,6 +158,23 @@ make -C daemon/stt
 - 許可ダイアログは出ない。SpeechTranscriber は、システム設定の「音声認識」の許可も「音声入力」（Dictation）の設定も使わない（macOS 26.5 で確認）。
 - モデルのダウンロード後は、60 秒までの音声を 1〜2 秒程度で文字起こしする（Apple Silicon で確認）。
 
+### 8. iPhone 向けの Web UI（任意）
+
+buddyd は、同じ LAN の iPhone に Web UI を出せる。端末は、ローカル CA が発行したクライアント証明書（mTLS）で認証する。
+
+```sh
+uv --directory daemon run buddy web init            # ローカル CA とサーバー証明書（~/.cardbuddy/pki）
+uv --directory daemon run buddy web enroll iphone   # ~/Downloads/cardbuddy-iphone.mobileconfig を書く
+launchctl kickstart -k gui/$(id -u)/com.sohsatoh.cardbuddy.buddyd
+```
+
+- `enroll` は、プロファイルのパスワードを Terminal にだけ表示する。プロファイルを AirDrop で iPhone に送ってインストールし、パスワードを入れる。そのあと、設定 > 一般 > 情報 > 証明書信頼設定で「CardBuddy Local CA」を完全に信頼する。
+- `https://<LocalHostName>.local:47825/`（または `buddy web devices` に出る IP）を開く。`http://` で開いても `https://` に転送する。
+- **信頼の範囲**：この CA を信頼した iPhone は、`.local`・`localhost`・プライベート IP の全体（10/8、172.16/12、192.168/16、127/8、169.254/16）について、この CA が発行した証明書を信頼する。CA にはこの範囲の名前制約を付けているので、ほかのドメインの証明書は発行できない。ただし CA の鍵を持つ人は、その iPhone に対して LAN 内の任意のホストになりすませる。
+- CA の鍵は、macOS の Keychain に置いたランダムなパスフレーズで暗号化し、`buddy web init`・`enroll`・`init --renew` のときだけ開く。この仕組みより前に作った CA の鍵は、`buddy web protect-ca` でその場で暗号化する（CA 自体は変わらない）。
+- `buddy web devices` は、登録した端末の一覧を出し、サーバー証明書の期限が近いときや Mac の LAN IP が証明書に含まれなくなったときに警告する。そのときは `buddy web init --renew` を実行する。`buddy web revoke <名前>` は buddyd を再起動しなくても効く。
+- macOS が buddyd（Python）への受信接続を許可するか尋ねたら、許可する。Web UI を止めるときは、buddyd を `--no-web` で起動する。
+
 ## キー操作
 
 Cardputer-Adv の矢印キーは、単体で押すと `;` `,` `.` `/` の文字になる。以下の「↑↓」は、単体の `;` `.` と Fn+↑↓ のどちらでもよい。Esc は `` ` `` の位置のキーである。

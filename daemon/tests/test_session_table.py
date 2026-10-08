@@ -178,7 +178,7 @@ def test_perm_hint_from_input():
         "/a.py\n- x = 1\n+ x = 2")
     assert perm_hint("Edit", {"file_path": "/a.py", "old_string": "a", "new_string": "b", "replace_all": True}) == (
         "/a.py (replace_all)\n- a\n+ b")
-    assert perm_hint("Write", {"file_path": "/a.txt", "content": "line1\nline2"}) == "/a.txt\nline1\nline2"
+    assert perm_hint("Write", {"file_path": "/a.txt", "content": "line1\nline2"}) == "/a.txt\n+ line1\n+ line2"
     assert perm_hint("Edit", {"file_path": "/a.py"}) == '{"file_path":"/a.py"}'
     assert perm_hint("NotebookEdit", {"notebook_path": "/a.ipynb", "new_source": ""}) == (
         '{"new_source":"","notebook_path":"/a.ipynb"}')
@@ -205,10 +205,10 @@ def test_perm_full_flag_and_truncation_to_plaintext_limit():
     t.upsert(SID, "/x", "", "idle", 0)
     content = "あ" * 600
     _, msgs = t.add_perm(SID, "Write", {"file_path": "/a", "content": content}, 0)
-    assert msgs[0]["full"] is True and msgs[0]["hint"] == "/a\n" + content and _pt(msgs[0]) <= MAX_PLAINTEXT
+    assert msgs[0]["full"] is True and msgs[0]["hint"] == "/a\n+ " + content and _pt(msgs[0]) <= MAX_PLAINTEXT
     _, msgs = t.add_perm(SID, "Write", {"file_path": "/a", "content": content * 2}, 0)
     m = msgs[0]
-    assert m["full"] is False and m["hint"].endswith("…") and ("/a\n" + content * 2).startswith(m["hint"][:-1])
+    assert m["full"] is False and m["hint"].endswith("…") and ("/a\n+ " + content * 2).startswith(m["hint"][:-1])
     assert MAX_PLAINTEXT - 3 < _pt(m) <= MAX_PLAINTEXT
     _, msgs = t.add_perm(SID, "T" * 3000, {}, 0)
     assert msgs[0]["full"] is False and msgs[0]["tool"] == "T" * 3000
@@ -457,3 +457,77 @@ def test_ask_is_not_subject_to_perm_idle_limit():
     t.add_ask(SID, QS)
     t.upsert(SID, "/x", "", "idle", 1000)
     assert t.expire(1000) == []
+
+
+def test_ask_reply_accepts_free_text():
+    t = SessionTable()
+    t.upsert(SID, "/x", "", "idle", 0)
+    req, _ = t.add_ask(SID, QS)
+    for bad in ({"text": ""}, {"text": "x" * 501}, {"text": 3}, {"text": "\ud83d"}, {"text": "a", "x": 1}, {}):
+        assert t.handle_device({"t": "ask_reply", "req": req, "answers": [bad, [0]]}) == [], bad
+    assert t.pop_events(SID) == []
+    answers = [{"text": "自由入力" + "x" * 496}, [1]]
+    assert t.handle_device({"t": "ask_reply", "req": req, "answers": answers}) == [
+        {"t": "resolved", "req": req, "by": "device"}]
+    assert t.pop_events(SID) == [{"type": "ask_reply", "req": req, "answers": answers}]
+
+
+def _act_table():
+    t = SessionTable()
+    t.upsert(SID, "/w/proj", "", "idle", 0)
+    return t
+
+
+def _tool(i, **kw):
+    return {"type": "tool_start", "tool_use_id": f"u{i}", "tool": "Read", **kw}
+
+
+def test_activity_keeps_only_the_latest_turn():
+    t = _act_table()
+    assert t.add_activity("unknown", {"type": "turn_start", "turn_id": "t0", "prompt": ""}, 1.0) is None
+    t.add_activity(SID, {"type": "turn_start", "turn_id": "t1", "prompt": "a"}, 1.0)
+    t.add_activity(SID, _tool(1), 2.0)
+    item = t.add_activity(SID, {"type": "turn_start", "turn_id": "t2", "prompt": "b"}, 3.0)
+    assert item == {"at": 3.0, "type": "turn_start", "turn_id": "t2", "prompt": "b"}
+    assert t.activity(SID) == [item]
+    assert t.activity("unknown") == []
+
+
+def test_activity_keeps_newest_200():
+    t = _act_table()
+    for i in range(250):
+        t.add_activity(SID, _tool(i), float(i))
+    a = t.activity(SID)
+    assert len(a) == 200
+    assert (a[0]["tool_use_id"], a[-1]["tool_use_id"]) == ("u50", "u249")
+
+
+def test_running_tools_are_started_and_not_yet_ended():
+    t = _act_table()
+    t.add_activity(SID, {"type": "turn_start", "turn_id": "t1", "prompt": "p"}, 0.0)
+    t.add_activity(SID, _tool("a", tool="Agent"), 1.0)
+    t.add_activity(SID, _tool("b", tool="Bash", summary="ls", agent_id="ag1", agent_type="Explore"), 2.0)
+    t.add_activity(SID, {"type": "tool_end", "tool_use_id": "ub", "is_error": False, "ms": 5}, 3.0)
+    t.add_activity(SID, {"type": "turn_end", "turn_id": "sub", "reason": "answer", "ms": 9, "agent_id": "ag1"}, 3.5)
+    t.add_activity(SID, _tool("c"), 4.0)
+    assert [x["tool_use_id"] for x in t.running_tools(SID)] == ["ua", "uc"]
+    assert t.running_tools("unknown") == []
+
+
+def test_delete_drops_activity():
+    t = _act_table()
+    t.add_activity(SID, _tool(1), 1.0)
+    t.delete(SID)
+    assert t.activity(SID) == [] and t.running_tools(SID) == []
+
+
+def test_edit_and_write_hints_mark_every_line():
+    from cardbuddy.session_table import perm_hint
+    # new_string に "- " で始まる行を入れても、削除される行には見えないこと
+    hint = perm_hint("Edit", {"file_path": "/a.py", "old_string": "a\nb", "new_string": "c\n- evil()\n+ x"})
+    assert hint == "/a.py\n- a\n- b\n+ c\n+ - evil()\n+ + x"
+    assert perm_hint("Edit", {"file_path": "/a.py", "old_string": "", "new_string": "x"}) == "/a.py\n- \n+ x"
+    # パスに改行を入れて、見出しや差分の行を偽造できないこと
+    hint = perm_hint("Write", {"file_path": "/a\n- fake", "content": "ok\n\nend"})
+    assert hint == "/a\\n- fake\n+ ok\n+ \n+ end"
+    assert perm_hint("Edit", {"file_path": "/a\n+ x", "old_string": "o", "new_string": "n"}).split("\n")[0] == "/a\\n+ x"

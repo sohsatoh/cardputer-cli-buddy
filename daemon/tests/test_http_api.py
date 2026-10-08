@@ -400,3 +400,66 @@ def test_on_up_resends_newest_8_requests():
     hub.on_up()
     assert hub.link.types() == ["sessions"] + ["perm"] * 8
     assert [m["req"] for m in hub.link.sent[1:]] == reqs[2:]
+
+
+TOOL_START = {"type": "tool_start", "tool_use_id": "toolu_1", "tool": "Bash", "summary": "ls -la",
+              "agent_id": "a1", "agent_type": "Explore"}
+
+
+@aio
+async def test_post_activity_publishes_and_keeps():
+    async with daemon() as (hub, path):
+        seen = []
+        unsubscribe = hub.subscribe_activity(lambda sid, item: seen.append((sid, item)))
+        assert await call(path, "POST", "/activity", {"sid": "unknown", "ev": TOOL_START}) == (200, {})
+        assert seen == []
+        await register(path)
+        before = time.time()
+        assert await call(path, "POST", "/activity", {"sid": SID, "ev": {**TOOL_START, "extra": "x"}}) == (200, {})
+        [(sid, item)] = seen
+        assert sid == SID and item == {**TOOL_START, "at": item["at"]} and item["at"] >= before
+        assert hub.activity(SID) == {"events": [item], "running": [item]}
+
+        await call(path, "POST", "/activity", {"sid": SID, "ev": {"type": "tool_end", "tool_use_id": "toolu_1",
+                                                                  "is_error": False, "ms": 12}})
+        assert len(seen) == 2 and hub.activity(SID)["running"] == []
+        unsubscribe()
+        await call(path, "POST", "/activity", {"sid": SID, "ev": {"type": "turn_start", "turn_id": "t2", "prompt": ""}})
+        assert len(seen) == 2
+        assert [e["type"] for e in hub.activity(SID)["events"]] == ["turn_start"]
+
+
+@aio
+async def test_activity_subscriber_failure_does_not_break_others():
+    async with daemon() as (hub, path):
+        seen = []
+        hub.subscribe_activity(lambda sid, item: 1 / 0)
+        hub.subscribe_activity(lambda sid, item: seen.append(item["type"]))
+        await register(path)
+        assert await call(path, "POST", "/activity", {"sid": SID, "ev": TOOL_START}) == (200, {})
+        assert seen == ["tool_start"]
+
+
+@aio
+async def test_post_activity_validates_fields():
+    turn_end = {"type": "turn_end", "turn_id": "t1", "reason": "answer", "ms": 10}
+    tool_end = {"type": "tool_end", "tool_use_id": "toolu_1", "is_error": True, "ms": 0}
+    good = [{"type": "turn_start", "turn_id": "t1", "prompt": "あ" * 80}, turn_end, tool_end,
+            {"type": "tool_start", "tool_use_id": "toolu_2", "tool": "Read"},
+            {**turn_end, "agent_id": "a1", "agent_type": "Explore"}]
+    bad = [
+        "not a dict", {"type": "nope"}, {"type": "turn_start", "turn_id": "t1"},
+        {"type": "turn_start", "turn_id": "t1", "prompt": "あ" * 81},
+        {"type": "turn_start", "turn_id": "", "prompt": "p"},
+        {**turn_end, "ms": -1}, {**turn_end, "agent_id": ""}, {**turn_end, "ms": 1.5}, {**turn_end, "ms": True}, {**turn_end, "reason": 3},
+        {**tool_end, "is_error": "no"}, {**TOOL_START, "tool_use_id": "x" * 129},
+        {**TOOL_START, "summary": "s" * 1025}, {**TOOL_START, "agent_id": 1}, {**TOOL_START, "agent_type": ""},
+        {**TOOL_START, "summary": "\ud83d"}, {**TOOL_START, "tool": ""},
+    ]
+    async with daemon() as (hub, path):
+        await register(path)
+        for ev in good:
+            assert await call(path, "POST", "/activity", {"sid": SID, "ev": ev}) == (200, {}), ev
+        for ev in bad:
+            assert (await call(path, "POST", "/activity", {"sid": SID, "ev": ev}))[0] == 400, ev
+        assert (await call(path, "POST", "/activity", {"sid": 1, "ev": TOOL_START}))[0] == 400

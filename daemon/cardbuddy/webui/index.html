@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CardBuddy</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <div id="hbar-list" class="hrow">
+    <h1>CardBuddy</h1>
+    <span id="conn" class="conn">接続中…</span>
+  </div>
+  <div id="hbar-detail" class="hrow" hidden>
+    <button id="back" type="button">‹ 一覧</button>
+    <span class="htitle"><span id="h-title"></span> <span id="h-badge"></span></span>
+    <button id="latest" type="button">最新へ ↓</button>
+  </div>
+</header>
+<main>
+  <section id="list">
+    <div id="reqs"></div>
+    <h2>セッション</h2>
+    <div id="sessions"><p class="empty">セッションはありません</p></div>
+  </section>
+  <section id="detail" hidden>
+    <div class="bar">
+      <span></span>
+      <button id="reload" type="button">更新</button>
+    </div>
+    <h2 id="d-title"></h2>
+    <p id="d-sub" class="sub"></p>
+    <section id="activity" class="card activity"></section>
+    <div id="d-reqs"></div>
+    <button id="older" type="button" hidden>さらに古いものを読む</button>
+    <div id="log"></div>
+    <form id="prompt-form">
+      <textarea id="prompt" maxlength="500" rows="4" placeholder="プロンプトを入力（音声入力も使えます）"></textarea>
+      <div class="row">
+        <span id="count" class="sub">0 / 500</span>
+        <button id="send" type="submit">送信</button>
+      </div>
+    </form>
+  </section>
+</main>
+<div id="toast" hidden></div>
+<script src="/activity.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

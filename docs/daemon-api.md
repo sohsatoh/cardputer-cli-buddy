@@ -37,7 +37,8 @@ perm hook が起動したときに呼ぶ。
 → `200 {"req": "r…"}`。
 
 - `desc` / `hint` / `full` は buddyd が `input` から作る（PROTOCOL.md の perm）。
-- `sid` が未登録の場合は `404`。デバイスと接続していない場合と、セッションに番号が無い場合は `503`。どちらも perm hook は何も出力せずに終了し、ネイティブダイアログだけになる。
+- `sid` が未登録の場合は `404`。Web UI が無効で、かつデバイスにも出せない場合（デバイスと接続していない、またはセッションに番号が無い）は `503`。どちらも perm hook は何も出力せずに終了し、ネイティブダイアログだけになる。
+- Web UI が有効（`~/.cardbuddy/pki` があり待ち受けている）なら、デバイスに出せなくても、Web を開いている端末が無くても、perm を作って保持する。後から Web を開いたときのスナップショットで答えられる。
 
 ### `GET /perm/{req}?timeout={sec}`
 デバイスの回答を待つ。
@@ -76,7 +77,7 @@ mod が、ツール呼び出しの終了時（`tool.call` の `next(e)` が解�
 ```
 → `200 {}`。デバイスへ `resolved` を送る。
 
-デバイスから返信が届いた場合は、buddyd が自分で req を片付け、デバイスへ `resolved{by:"device"}` を送る。
+デバイスから返信が届いた場合は、buddyd が自分で req を片付け、デバイスへ `resolved{by:"device"}` を送る。Web UI から答えた場合は `resolved{by:"web"}`。
 
 ## 通知の受信（mod、long-poll）
 
@@ -111,6 +112,33 @@ mod が `prompt` を投入したあとに呼ぶ。
 - mod は `prompt.submit`（端末とデバイスの両方のプロンプト）で `user` を、`turn.complete` の `answer` で `assistant` を送る。空文字は送らない。
 - buddyd はセッションごとに新しい 20 件だけを保持し、1 件は 4000 文字で切る。未登録の `sid` は無視して `200 {}` を返す。
 - デバイスの `log_req` には、この保持分から PROTOCOL.md の規則で `log` を作って返す。
+
+## 処理の様子（mod）
+
+### `POST /activity`
+```json
+{"sid": "...", "ev": {"type": "tool_start", "tool_use_id": "toolu_…", "tool": "Bash", "summary": "npm test"}}
+```
+→ `200 {}`
+
+mod は、ターンとツール呼び出しの開始・終了を、待たずに送る。
+
+| type | fields | 送るとき |
+| --- | --- | --- |
+| `turn_start` | `turn_id`, `prompt`（先頭 80 文字。続きのターンでは空） | main loop のターンの開始（`turn.start`） |
+| `turn_end` | `turn_id`, `reason`（`answer` / `aborted` / `refusal` / `error`）, `ms`, `agent_id`?, `agent_type`? | ターンの終了（`turn.complete`）。subagent のターンなら `agent_id` が付く |
+| `tool_start` | `tool_use_id`, `tool`, `summary`?, `agent_id`?, `agent_type`? | ツール呼び出しの開始（`tool.call`） |
+| `tool_end` | `tool_use_id`, `is_error`, `ms` | ツール呼び出しの終了。拒否・中断も `is_error: true` |
+
+- `summary` は、Bash なら `command` の先頭 120 文字、ファイル系のツールなら `file_path`（`notebook_path`）。それ以外のツールには付けない。
+- `agent_id` は subagent の中の呼び出しとターンにだけ付く。`agent_type` は、その subagent の種類（`Explore` など）が分かるときだけ付く。
+- `turn_start` は main loop でだけ送る。main のターンの `turn_end` は、直前の `turn_start` と同じ `turn_id` を持つ。それ以外の `turn_end` は subagent のターン。
+- subagent の起動は `Agent` ツールの `tool_start` で表す。subagent がバックグラウンドで動く場合、`Agent` の `tool_end` はすぐに届き、subagent の終わりはその subagent の `turn_end` で分かる。ただし、バックグラウンドの subagent の `turn_end` には `agent_id` が付かないことがある（Claude Code がその turn に agentId を渡さないため）。
+- AskUserQuestion の呼び出しも `tool_start` / `tool_end` で送る。
+- 文字数はコードポイントで数える。各フィールドは型と長さを検証し、合わなければ `400`（`turn_id` 64、`prompt` 80、`reason` 32、`tool_use_id` 128、`tool` 128、`summary` 1024、`agent_id` 64、`agent_type` 128 文字まで。`ms` は 0 以上の整数）。
+- buddyd は、受信時刻 `at`（UNIX 秒）を付けて、セッションごとに新しい 200 件を保持する。`turn_start` を受けたら、それまでの分を捨てる（最新のターンだけ残る）。未登録の `sid` は無視して `200 {}` を返す。
+- 送信は 1 件ずつ独立しているので、届く順番は前後しうる。実行中のツールは、「`tool_start` があり、同じ `tool_use_id` の `tool_end` が無いもの」として、順番に依らず導出する。
+- buddyd の中では、`Hub.subscribe_activity(cb)` で新しいイベントを `cb(sid, item)` として受け取れる（戻り値を呼ぶと購読をやめる）。`Hub.activity(sid)` は `{"events": [...], "running": [...]}` を返す。
 
 ## 状態確認
 

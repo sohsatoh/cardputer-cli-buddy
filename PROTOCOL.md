@@ -108,7 +108,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 | `sessions` | `s: [{n, id, name, title, state, last}]` | セッション一覧の全量。変化したときと、セッション確立直後に送る。 |
 | `perm` | `n, req, id, name, tool, desc, hint, full` | 権限の確認待ち。 |
 | `ask` | `n, req, id, name, qs: [{q, h, o: [label…], m}]` | AskUserQuestion。 |
-| `resolved` | `req, by` | `by`: `terminal` / `device` / `abort`。表示中の perm / ask を消す。 |
+| `resolved` | `req, by` | `by`: `terminal` / `device` / `web` / `abort`。表示中の perm / ask を消す。デバイスは `by` の値によらず消す。 |
 | `ack_prompt` | `n, ok, queued` | `prompt` の結果。`ok=false` は対象セッションが無い場合。 |
 | `ping` | （なし） | 生存確認。デバイスは `pong` を返す。 |
 | `log` | `n, p, more, items: [{r, x, c}]` | `log_req` への応答。セッションログの 1 ページ（古い順）。 |
@@ -127,8 +127,9 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 - `desc`：Bash のときだけ、ツール入力の `description`（最大 80 文字）。それ以外は空文字。
 - `hint`：承認の判断に必要な内容の全文。
   - Bash：`command`。
-  - Edit：`file_path`、`- old_string`、`+ new_string` を改行で連結（`replace_all` が true なら 1 行目に付記）。
-  - Write：`file_path` と `content` を改行で連結。
+  - Edit：`file_path` の行に続けて、`old_string` の各行に `- `、`new_string` の各行に `+ ` を付けて改行で連結（`replace_all` が true なら 1 行目に付記）。
+  - Write：`file_path` の行に続けて、`content` の各行に `+ ` を付けて改行で連結。
+  - Edit / Write の `file_path` に含まれる改行は `\n` と書く（行頭の記号や見出しを偽造できないようにする）。
   - それ以外：`input` をキー整列した JSON。
 - `full`：`tool` と `hint` を切り詰めずに平文 2048 byte に収められたときだけ true。収まらなければ `hint` を切り詰めて false にする。
 - **デバイスは `full` が true のときだけ allow を受け付ける。** false のときは deny だけを受け付け、端末で確認するよう表示する。
@@ -139,7 +140,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 | t | fields | 説明 |
 | --- | --- | --- |
 | `perm_reply` | `req, decision` | `decision`: `allow` / `deny`。 |
-| `ask_reply` | `req, answers` | `answers`: 問いごとの選択 index の配列（`[[0], [1, 3]]`）。 |
+| `ask_reply` | `req, answers` | `answers`: 問いごとに、選択 index の配列か、自由入力の `{"text": "…"}`（`[[0], {"text": "別の案"}]`）。 |
 | `prompt` | `n, id, text` | `text` は最大 500 文字。 |
 | `pong` | （なし） | `ping` への応答。 |
 | `log_req` | `n, id, p` | セッションログの `p` ページ目（0 が最新）を要求する。 |
@@ -148,6 +149,7 @@ ver(1) ‖ 'A' ‖ dir(1) ‖ ctr(4) ‖ ct(n) ‖ tag(16)
 | `voice_cancel` | `vid` | 録音の取り消し。ホストは受け取った音声を捨て、何も返さない。 |
 
 - ホストは、未解決でない `req` への返信を捨てる（先に端末で答えた場合など）。
+- `ask_reply` の自由入力は Claude Code の "Other" に当たり、`text` がそのまま回答の文字列になる。`text` は 1〜500 文字。選択 index とは同じ問いの中で併用しない（multi で選択と自由入力を両方答える場合は、送る側がラベルと入力を `, ` でつないだ `text` にする）。Cardputer はまだ送らない。
 - `prompt` は、`n` と `id` の両方がセッション表と一致するときだけ投入する。一致しなければ `ack_prompt{ok:false}` を返す。
 - `log_req` も `n` と `id` の両方が一致するときだけ応える。一致しなければ `log{n, items:[]}` を返す。
 

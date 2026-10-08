@@ -17,10 +17,12 @@ PERM_IDLE = 60.0
 MAX_N = 9
 STATES = ("running", "idle")
 PROMPT_MAX = 500
+ANSWER_TEXT_MAX = 500
 # ponytail: 結果は件数で古い順に捨てる、perm hook が 25 秒ごとに取りに来る前提で十分な数
 MAX_RESULTS = 256
 LOG_KEEP, LOG_TEXT_MAX, LOG_CHUNK = 20, 4000, 500
 ROLES = {"user": "u", "assistant": "a"}
+ACTIVITY_KEEP = 200
 
 
 def trunc(s: str, n: int) -> str:
@@ -31,17 +33,29 @@ def _json(v) -> str:
     return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+HINT_KEYS = {"Bash": ("command", "description"), "Edit": ("file_path", "old_string", "new_string", "replace_all"),
+             "Write": ("file_path", "content")}
+
+
 def perm_hint(tool: str, inp: dict) -> str:
     def has(*keys):
         return all(isinstance(inp.get(k), str) for k in keys)
 
     if tool == "Bash" and has("command"):
         return inp["command"]
+    # 印を先頭の行にだけ付けると、new_string の中の "- " 行が削除される行に見えてしまうので全行に付ける
+    # パスの改行も、見出しや差分の行を偽造できないよう \n と書く
+    def mark(sign, text):
+        return "\n".join(f"{sign} {line}" for line in text.split("\n"))
+
+    def path():
+        return inp["file_path"].replace("\n", "\\n")
+
     if tool == "Edit" and has("file_path", "old_string", "new_string"):
-        head = inp["file_path"] + (" (replace_all)" if inp.get("replace_all") is True else "")
-        return f"{head}\n- {inp['old_string']}\n+ {inp['new_string']}"
+        head = path() + (" (replace_all)" if inp.get("replace_all") is True else "")
+        return f"{head}\n{mark('-', inp['old_string'])}\n{mark('+', inp['new_string'])}"
     if tool == "Write" and has("file_path", "content"):
-        return f"{inp['file_path']}\n{inp['content']}"
+        return f"{path()}\n{mark('+', inp['content'])}"
     return _json(inp)
 
 
@@ -69,6 +83,7 @@ class SessionTable:
         self.reqs: dict[str, dict] = {}  # req -> {sid, kind, fields, qs | key, waiters, idle_since}
         self.queues: dict[str, list] = {}
         self.logs: dict[str, deque] = {}
+        self.activities: dict[str, deque] = {}  # 最新のターンの activity（受信時刻 at つき）
         self.perm_results: dict[str, dict] = {}  # 解決済み perm の {decision} / {released}
 
     def upsert(self, sid: str, cwd: str, title: str, state: str, now: float) -> int | None:
@@ -77,17 +92,25 @@ class SessionTable:
             s = self.sessions[sid] = {"n": None}
             self.queues[sid] = []
             self.logs[sid] = deque(maxlen=LOG_KEEP)
+            self.activities[sid] = deque(maxlen=ACTIVITY_KEEP)
         if s["n"] is None:
             used = {x["n"] for x in self.sessions.values()}
             s["n"] = next((n for n in range(1, MAX_N + 1) if n not in used), None)
         s.update(cwd=cwd, title=title, state=state, seen=now)
+        s.setdefault("updated_at", 0)
         return s["n"]
+
+    def touch(self, sid: str, at: float):
+        """Web の一覧の並べ替えに使う、最後に動きがあった時刻（UNIX 秒）を記録する。"""
+        if sid in self.sessions:
+            self.sessions[sid]["updated_at"] = at
 
     def delete(self, sid: str) -> list[dict]:
         if self.sessions.pop(sid, None) is None:
             return []
         self.queues.pop(sid, None)
         self.logs.pop(sid, None)
+        self.activities.pop(sid, None)
         out = []
         for req in [r for r, v in self.reqs.items() if v["sid"] == sid]:
             out += self.resolve(req, "abort")
@@ -132,6 +155,28 @@ class SessionTable:
                 return msg
             tl, ll = max(tl // 2, 1), max(ll // 2, 1)
 
+    def web_sessions(self) -> list[dict]:
+        rows = sorted(self.sessions.items(), key=lambda kv: (kv[1]["n"] is None, kv[1]["n"] or 0))
+        return [{"sid": sid, "n": s["n"], "id": sid[:8], "name": os.path.basename(s["cwd"].rstrip("/")),
+                 "title": trunc(s["title"].split("\n", 1)[0], 80), "state": self._state(sid),
+                 "last": trunc(self._last(sid), 200), "updated_at": s.get("updated_at", 0)} for sid, s in rows]
+
+    def web_req(self, req: str) -> dict | None:
+        """Web 向けの perm / ask。デバイス向けと違い、平文の上限が無いので全文を入れる。"""
+        r = self.reqs.get(req)
+        if r is None:
+            return None
+        sid = r["sid"]
+        head = {"t": r["kind"], "req": req, "sid": sid, "n": self.sessions[sid]["n"], "id": sid[:8],
+                "name": os.path.basename(self.sessions[sid]["cwd"].rstrip("/"))}
+        return {**head, **r["web"]} if r["kind"] == "perm" else {**head, "qs": r["qs"]}
+
+    def web_reqs(self) -> list[dict]:
+        return [self.web_req(req) for req in self.reqs]
+
+    def web_log(self, sid: str) -> list[dict] | None:
+        return list(self.logs[sid]) if sid in self.logs else None
+
     def _add(self, sid: str, kind: str, fields: dict, **extra) -> tuple[str, list[dict]]:
         if sid not in self.sessions:
             raise KeyError(sid)
@@ -154,7 +199,17 @@ class SessionTable:
                 else:
                     hi = mid - 1
             fields = {**base, "hint": hint[:lo] + "…" if lo >= 0 else "", "full": False}
-        return self._add(sid, "perm", fields, key=_input_key(tool, inp), waiters=0, idle_since=now)
+        # hint に出していない入力（Bash の run_in_background など）も Web では見せる
+        rest = {} if hint == _json(inp) else {k: v for k, v in inp.items() if k not in HINT_KEYS.get(tool, ())}
+        web = {"tool": tool, "desc": desc if isinstance(desc, str) else "", "hint": hint,
+               "extra": _json(rest) if rest else ""}
+        # Web では、偽造できない形で見せるため、Edit / Write の中身を別々の欄として送る
+        if tool == "Edit" and hint != _json(inp):
+            web["diff"] = {"path": inp["file_path"], "old": inp["old_string"], "new": inp["new_string"],
+                           "replace_all": inp.get("replace_all") is True}
+        elif tool == "Write" and hint != _json(inp):
+            web["diff"] = {"path": inp["file_path"], "content": inp["content"]}
+        return self._add(sid, "perm", fields, key=_input_key(tool, inp), waiters=0, idle_since=now, web=web)
 
     def perm_wait_begin(self, req: str):
         if req in self.reqs:
@@ -217,6 +272,30 @@ class SessionTable:
         if sid in self.logs and text:
             self.logs[sid].append({"r": ROLES[role], "x": trunc(text, LOG_TEXT_MAX)})
 
+    def add_activity(self, sid: str, ev: dict, now: float) -> dict | None:
+        acts = self.activities.get(sid)
+        if acts is None:
+            return None
+        if ev["type"] == "turn_start":
+            acts.clear()
+        item = {"at": now, **ev}
+        acts.append(item)
+        return item
+
+    def activity(self, sid: str) -> list[dict]:
+        return list(self.activities.get(sid, ()))
+
+    def running_tools(self, sid: str) -> list[dict]:
+        acts = self.activities.get(sid, ())
+        ended = {a["tool_use_id"] for a in acts if a["type"] == "tool_end"}
+        return [a for a in acts if a["type"] == "tool_start" and a["tool_use_id"] not in ended]
+
+    def queue_prompt(self, sid: str, text: str) -> bool:
+        if sid not in self.queues:
+            return False
+        self.queues[sid].append({"type": "prompt", "text": text})
+        return True
+
     def pop_events(self, sid: str) -> list[dict]:
         q = self.queues.get(sid)
         if not q:
@@ -224,10 +303,10 @@ class SessionTable:
         self.queues[sid] = []
         return q
 
-    def handle_device(self, msg: dict) -> list[dict]:
+    def handle_device(self, msg: dict, by: str = "device") -> list[dict]:
         t = msg.get("t")
         if t in ("perm_reply", "ask_reply"):
-            return self._reply(t, msg)
+            return self._reply(t, msg, by)
         if t == "prompt":
             return self._prompt(msg)
         if t == "log_req":
@@ -235,7 +314,7 @@ class SessionTable:
         log.warning("drop device message: unknown t=%r", t)
         return []
 
-    def _reply(self, t: str, msg: dict) -> list[dict]:
+    def _reply(self, t: str, msg: dict, by: str) -> list[dict]:
         req = msg.get("req")
         r = self.reqs.get(req) if isinstance(req, str) else None
         if r is None or r["kind"] + "_reply" != t:
@@ -245,12 +324,12 @@ class SessionTable:
             if msg.get("decision") not in ("allow", "deny"):
                 log.warning("drop perm_reply: bad decision")
                 return []
-            return self.resolve(req, "device", msg["decision"])
+            return self.resolve(req, by, msg["decision"])
         if not _valid_answers(msg.get("answers"), r["qs"]):
             log.warning("drop ask_reply: bad answers")
             return []
         self.queues[r["sid"]].append({"type": t, "req": req, "answers": msg["answers"]})
-        return self.resolve(req, "device")
+        return self.resolve(req, by)
 
     def _match(self, n: int, sid8: str) -> str | None:
         return next((k for k, s in self.sessions.items() if s["n"] == n and k[:8] == sid8), None)
@@ -300,10 +379,24 @@ class SessionTable:
         return []
 
 
+def _valid_text(v) -> bool:
+    if not isinstance(v, str) or not 0 < len(v) <= ANSWER_TEXT_MAX:
+        return False
+    try:
+        v.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _valid_answers(answers, qs) -> bool:
     if not isinstance(answers, list) or len(answers) != len(qs):
         return False
     for a, q in zip(answers, qs):
+        if isinstance(a, dict):
+            if set(a) != {"text"} or not _valid_text(a["text"]):
+                return False
+            continue
         if not isinstance(a, list) or not a or len(set(map(repr, a))) != len(a):
             return False
         if not q["m"] and len(a) != 1:

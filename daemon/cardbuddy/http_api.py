@@ -20,6 +20,15 @@ MAX_HEADERS = 100
 READ_TIMEOUT = 10.0
 # クライアント側の $.http.fetch が 30 秒で打ち切るため、待ちは必ずそれより前に返す
 WAIT_DEFAULT = WAIT_MAX = 25
+# type ごとのフィールド: (型, 最大長, 必須)。文字列は空を許さない（prompt だけは続きのターンで空になる）
+ACTIVITY_FIELDS = {
+    "turn_start": {"turn_id": (str, 64, True), "prompt": (str, 80, True)},
+    "turn_end": {"turn_id": (str, 64, True), "reason": (str, 32, True), "ms": (int, None, True),
+                 "agent_id": (str, 64, False), "agent_type": (str, 128, False)},
+    "tool_start": {"tool_use_id": (str, 128, True), "tool": (str, 128, True), "summary": (str, 1024, False),
+                   "agent_id": (str, 64, False), "agent_type": (str, 128, False)},
+    "tool_end": {"tool_use_id": (str, 128, True), "is_error": (bool, None, True), "ms": (int, None, True)},
+}
 
 
 class HttpError(Exception):
@@ -62,6 +71,25 @@ def _input(body: dict) -> dict:
     if not isinstance(v, dict) or not _is_text(json.dumps(v, ensure_ascii=False)):
         raise HttpError(400, "bad input")
     return v
+
+
+def _activity(ev) -> dict:
+    fields = ACTIVITY_FIELDS.get(ev.get("type")) if isinstance(ev, dict) else None
+    if fields is None:
+        raise HttpError(400, "bad ev")
+    out = {"type": ev["type"]}
+    for k, (typ, maxlen, required) in fields.items():
+        if k not in ev and not required:
+            continue
+        v = ev.get(k)
+        if typ is str:
+            ok = type(v) is str and _is_text(v) and len(v) <= maxlen and (v != "" or k == "prompt")
+        else:
+            ok = type(v) is typ and (typ is bool or v >= 0)
+        if not ok:
+            raise HttpError(400, f"bad ev.{k}")
+        out[k] = v
+    return out
 
 
 def _timeout(q: dict) -> float:
@@ -116,7 +144,10 @@ async def _route(hub, reader, method: str, target: str, body: dict):
             raise HttpError(400, "bad state")
         sid = _get(body, "sid", str, 128)
         had_n = hub.table.sessions.get(sid, {}).get("n") is not None
+        new = sid not in hub.table.sessions
         n = hub.table.upsert(sid, _get(body, "cwd", str), _get(body, "title", str), state, time.monotonic())
+        if new:
+            hub.table.touch(sid, time.time())
         if not had_n:
             hub.send(hub.table.pending_msgs(sid=sid))
         hub.kick()
@@ -124,11 +155,15 @@ async def _route(hub, reader, method: str, target: str, body: dict):
     if p == "/perm":
         sid = _session(hub, _get(body, "sid", str, 128))
         tool, inp = _get(body, "tool", str), _input(body)
-        # デバイスに出せない perm を作ると、perm hook が答えの来ない待ちを続けるだけになる
-        if not hub.link.connected or hub.table.sessions[sid]["n"] is None:
+        # どこにも出せない perm を作ると、perm hook が答えの来ない待ちを続けるだけになる
+        # Web UI が動いていれば、Safari を閉じていても後で開いたときのスナップショットで答えられるので作る
+        on_device = hub.link.connected and hub.table.sessions[sid]["n"] is not None
+        if not on_device and not hub.web_enabled:
             raise HttpError(503, "device unavailable")
         req, msgs = hub.table.add_perm(sid, tool, inp, time.monotonic())
+        hub.table.touch(sid, time.time())
         hub.send(msgs)
+        hub.web_new_req(req)
         return {"req": req}
     if p == "/tool_done":
         hub.send(hub.table.tool_done(_get(body, "sid", str, 128), _get(body, "tool", str), _input(body)))
@@ -136,7 +171,9 @@ async def _route(hub, reader, method: str, target: str, body: dict):
     if p == "/ask":
         sid = _session(hub, _get(body, "sid", str, 128))
         req, msgs = hub.table.add_ask(sid, _qs(body.get("qs")))
+        hub.table.touch(sid, time.time())
         hub.send(msgs)
+        hub.web_new_req(req)
         return {"req": req}
     if p == "/resolved":
         by = _get(body, "by", str)
@@ -148,8 +185,18 @@ async def _route(hub, reader, method: str, target: str, body: dict):
         role = _get(body, "role", str)
         if role not in ROLES:
             raise HttpError(400, "bad role")
-        hub.table.add_log(_get(body, "sid", str, 128), role, _get(body, "text", str))
+        sid = _get(body, "sid", str, 128)
+        hub.table.add_log(sid, role, _get(body, "text", str))
+        hub.table.touch(sid, time.time())
         hub.kick()
+        return {}
+    if p == "/activity":
+        sid, ev = _get(body, "sid", str, 128), _activity(body.get("ev"))
+        item = hub.table.add_activity(sid, ev, time.time())
+        if item is not None:
+            hub.publish_activity(sid, item)
+            hub.table.touch(sid, item["at"])
+            hub.kick()
         return {}
     if p == "/ack_prompt":
         sid = _session(hub, _get(body, "sid", str, 128))
@@ -196,7 +243,7 @@ async def _poll(hub, reader, sid: str, timeout: float) -> list[dict]:
             del hub.polls[sid]
 
 
-async def _read_request(reader) -> tuple[str, str, dict]:
+async def _read_request(reader) -> tuple[str, str, dict[str, str], dict]:
     try:
         method, target, _ = (await reader.readline()).decode("ascii").split(" ", 2)
     except (UnicodeDecodeError, ValueError):
@@ -220,25 +267,33 @@ async def _read_request(reader) -> tuple[str, str, dict]:
         raise HttpError(413, "body too large")
     raw = await reader.readexactly(n)
     if not raw:
-        return method, target, {}
+        return method, target, headers, {}
     try:
         body = json.loads(raw)
     except ValueError:
         raise HttpError(400, "bad json") from None
     if not isinstance(body, dict):
         raise HttpError(400, "body must be an object")
-    return method, target, body
+    return method, target, headers, body
+
+
+# 10 秒ごとの heartbeat や long-poll などは数が多いので、成功したときはログに出さない
+QUIET = {"/session", "/poll", "/activity", "/log", "/tool_done"}
 
 
 async def _handle(hub, reader, writer):
+    method = target = "?"
     try:
         try:
-            method, target, body = await asyncio.wait_for(_read_request(reader), READ_TIMEOUT)
+            method, target, _, body = await asyncio.wait_for(_read_request(reader), READ_TIMEOUT)
             code, resp = 200, await _route(hub, reader, method, target, body)
         except HttpError as e:
             code, resp = e.code, {"error": str(e)}
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):
             code, resp = 400, {"error": "bad request"}
+        path = urlsplit(target).path
+        if code != 200 or not (path in QUIET or path.startswith("/perm/") or path.startswith("/session/")):
+            log.info("api: %s %s %d", method, path, code)
         data = json.dumps(resp).encode()
         writer.write(
             f"HTTP/1.1 {code} {http.HTTPStatus(code).phrase}\r\nContent-Type: application/json\r\n"
