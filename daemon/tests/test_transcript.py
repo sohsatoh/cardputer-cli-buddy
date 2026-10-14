@@ -140,3 +140,45 @@ def test_symlinked_projects_root_is_allowed(env):
     (d / ".claude-max").mkdir()
     os.symlink(d / ".claude" / "projects", d / ".claude-max" / "projects")
     assert transcript.read(table, SID)["total"] == len(SAMPLE)
+
+
+def test_non_human_user_entries_are_folded_as_notices(env):
+    _, path, table = env
+    entries = [
+        user("<task-notification>\n<task-id>x</task-id>\n</task-notification>", origin={"kind": "task-notification"}),
+        user("<task-notification>origin が無い形式</task-notification>"),
+        user("<command-message>foo</command-message>\n<command-name>/foo</command-name>", origin={"kind": "human"}),
+        user("<bash-input>ls</bash-input>"),
+        user("<bash-stdout>out</bash-stdout><bash-stderr></bash-stderr>"),
+        user("<local-command-stdout>done</local-command-stdout>"),
+        user("プラグインが投入した文", origin={"kind": "plugin"}),
+        user("続けてください", origin={"kind": "auto-continuation"}),
+        user([{"type": "text", "text": "<system-reminder>内部</system-reminder>"}]),
+        user("人のプロンプト", origin={"kind": "human"}),
+        user("<div>タグで始まる人の文</div>", origin={"kind": "human"}),
+    ]
+    with path.open("a") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    items = transcript.read(table, SID, after=len(SAMPLE))["items"]
+    assert [(it["kind"], it.get("label")) for it in items] == [
+        ("notice", "通知"), ("notice", "通知"), ("notice", "コマンド"), ("notice", "シェル"), ("notice", "シェル"),
+        ("notice", "コマンドの出力"), ("notice", "プラグイン"), ("notice", "自動の続き"), ("notice", "システム"),
+        ("user", None), ("user", None)]
+    assert items[0]["text"].startswith("<task-notification>")
+
+
+def test_prompts_submitted_as_user_by_plugins_are_prompts(env):
+    _, path, table = env
+    entries = [
+        user("デバイスから", origin={"kind": "plugin", "name": "cardbuddy", "asUser": True}),
+        user("asUser 無し", origin={"kind": "plugin", "name": "cardbuddy"}),
+        user("他のプラグインが人として", origin={"kind": "plugin", "name": "other", "asUser": True}),
+        user("他のプラグイン", origin={"kind": "plugin", "name": "other"}),
+    ]
+    with path.open("a") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    items = transcript.read(table, SID, after=len(SAMPLE))["items"]
+    assert [(it["kind"], it.get("via"), it.get("label")) for it in items] == [
+        ("user", "cardbuddy", None), ("user", "cardbuddy", None), ("user", "other", None), ("notice", None, "プラグイン")]

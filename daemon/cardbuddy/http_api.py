@@ -161,6 +161,7 @@ async def _route(hub, reader, method: str, target: str, body: dict):
         if not on_device and not hub.web_enabled:
             raise HttpError(503, "device unavailable")
         req, msgs = hub.table.add_perm(sid, tool, inp, time.monotonic())
+        hub.table.stamp(req, time.time())
         hub.table.touch(sid, time.time())
         hub.send(msgs)
         hub.web_new_req(req)
@@ -171,6 +172,7 @@ async def _route(hub, reader, method: str, target: str, body: dict):
     if p == "/ask":
         sid = _session(hub, _get(body, "sid", str, 128))
         req, msgs = hub.table.add_ask(sid, _qs(body.get("qs")))
+        hub.table.stamp(req, time.time())
         hub.table.touch(sid, time.time())
         hub.send(msgs)
         hub.web_new_req(req)
@@ -193,10 +195,9 @@ async def _route(hub, reader, method: str, target: str, body: dict):
     if p == "/activity":
         sid, ev = _get(body, "sid", str, 128), _activity(body.get("ev"))
         item = hub.table.add_activity(sid, ev, time.time())
+        # subagent の作業やツールの出入りでは、一覧の並び（updated_at）を動かさない
         if item is not None:
             hub.publish_activity(sid, item)
-            hub.table.touch(sid, item["at"])
-            hub.kick()
         return {}
     if p == "/ack_prompt":
         sid = _session(hub, _get(body, "sid", str, 128))

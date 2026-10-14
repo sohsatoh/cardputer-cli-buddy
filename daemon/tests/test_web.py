@@ -191,7 +191,7 @@ async def test_web_allow_reaches_perm_hook_wait(home):
         assert st == 200
         req = body["req"]
         ev = (await sse_events(r, 1))[0]
-        assert ev == {"t": "perm", "req": req, "sid": SID, "n": 1, "id": SID[:8], "name": "proj",
+        assert ev.pop("at") > 0 and ev == {"t": "perm", "req": req, "sid": SID, "n": 1, "id": SID[:8], "name": "proj",
                       "tool": "Bash", "desc": "", "hint": cmd, "extra": ""}
         wait = asyncio.create_task(unix(sock, "GET", f"/perm/{req}?timeout=5"))
         await asyncio.sleep(0.1)
@@ -466,8 +466,18 @@ async def test_sessions_carry_updated_at_and_are_republished(home, monkeypatch):
         await asyncio.sleep(0.05)
         await unix(sock, "POST", "/session", {"sid": SID, "cwd": "/w/a", "title": "t", "state": "running"})
         assert hub.table.sessions[SID]["updated_at"] == first[SID]
-        for path, body in (("/log", {"sid": SID, "role": "assistant", "text": "x"}),
-                           ("/activity", {"sid": SID, "ev": {"type": "tool_start", "tool_use_id": "u", "tool": "Bash"}}),
+        # subagent の作業やツールの出入り（activity）では、一覧の上に上がらない
+        for ev in ({"type": "turn_start", "turn_id": "t1", "prompt": "p"},
+                   {"type": "tool_start", "tool_use_id": "u", "tool": "Bash", "agent_id": "ag"},
+                   {"type": "tool_end", "tool_use_id": "u", "is_error": False, "ms": 3},
+                   {"type": "turn_end", "turn_id": "bg", "reason": "answer", "ms": 9}):
+            before = hub.table.sessions[SID]["updated_at"]
+            await asyncio.sleep(0.01)
+            await unix(sock, "POST", "/activity", {"sid": SID, "ev": ev})
+            assert hub.table.sessions[SID]["updated_at"] == before, ev["type"]
+        for path, body in (("/log", {"sid": SID, "role": "user", "text": "x"}),
+                           ("/log", {"sid": SID, "role": "assistant", "text": "x"}),
+                           ("/perm", {"sid": SID, "tool": "Bash", "input": {"command": "ls"}}),
                            ("/ask", {"sid": SID, "qs": [{"q": "q", "h": "h", "o": ["a", "b"], "m": False}]})):
             before = hub.table.sessions[SID]["updated_at"]
             await asyncio.sleep(0.01)
@@ -562,3 +572,22 @@ def test_ui_draws_edit_and_write_in_separate_sections():
     js = (UI / "app.js").read_text()
     assert 'section("変更前（削除）", d.old)' in js and 'section("変更後（追加）", d.new)' in js
     assert 'section("書き込む内容", d.content)' in js
+
+
+@aio
+async def test_web_requests_carry_creation_time(home):
+    import time as _time
+    async with running(home) as (hub, port, sock):
+        await unix(sock, "POST", "/session", {"sid": SID, "cwd": "/w/proj", "title": "t", "state": "running"})
+        t0 = _time.time()
+        _, perm = await unix(sock, "POST", "/ask", {"sid": SID, "qs": [{"q": "q", "h": "h", "o": ["a", "b"], "m": False}]})
+        r, w = await open_sse(port, ctx(home))
+        events = await sse_events(r, 2)
+        ask = next(e for e in events if e["t"] == "ask")
+        assert t0 <= ask["at"] <= _time.time()
+        w.close()
+
+
+def test_ui_folds_notices():
+    js = (UI / "app.js").read_text()
+    assert 'if (it.kind === "notice") return foldable("notice"' in js

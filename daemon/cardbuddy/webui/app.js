@@ -2,7 +2,7 @@
 // 表示はすべて textContent で組み立てる（hint などはツールの入力そのままで、HTML として解釈させない）
 
 const $ = (id) => document.getElementById(id);
-const state = { sessions: [], reqs: new Map(), current: null, guardUntil: 0 };
+const state = { sessions: [], reqs: new Map(), current: null, guardUntil: 0, snapshotAt: null, pendingOpen: false, badgeShown: 0 };
 const cards = { list: new Map(), detail: new Map() };
 // 制御文字・双方向制御文字・ゼロ幅文字は、見た目と実際の文字列を食い違わせられるので記号で見せる
 const HIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
@@ -140,8 +140,21 @@ function relative(at) {
   return `${Math.floor(sec / 86400)} 日前`;
 }
 
+// 要対応（perm / ask）は古い順。いちばん長く待っているものから答えられるようにする
+function pending(sid) {
+  return [...state.reqs.values()].filter((r) => !sid || r.sid === sid).sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+
 function sortedSessions() {
-  const rows = [...state.sessions].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  const oldest = new Map();
+  for (const r of pending()) if (!oldest.has(r.sid)) oldest.set(r.sid, r.at || 0);
+  // 要対応のあるセッションは、updated_at より優先して上に固定する
+  const rows = [...state.sessions].sort((a, b) => {
+    const pa = oldest.has(a.sid), pb = oldest.has(b.sid);
+    if (pa !== pb) return pa ? -1 : 1;
+    if (pa) return oldest.get(a.sid) - oldest.get(b.sid);
+    return (b.updated_at || 0) - (a.updated_at || 0);
+  });
   const order = rows.map((s) => s.sid).join(",");
   // 並びが変わった直後は行の位置がずれているので、別のセッションを開かないようタップを受け付けない
   if (order !== list.order) {
@@ -153,10 +166,12 @@ function sortedSessions() {
 
 function sessionCard(s) {
   const open = () => { if (Date.now() >= list.guardUntil) openDetail(s.sid); };
-  return el("div", { class: "card session", onclick: open },
+  const n = pending(s.sid).length;
+  return el("div", { class: n ? "card session attention" : "card session", onclick: open, "data-sid": s.sid },
     el("div", { class: "top" },
       el("span", { class: "num", text: s.n ? `#${s.n}` : "#-" }),
       el("span", { class: "name", text: s.name }),
+      n ? el("span", { class: "pcount", text: `要対応 ${n}` }) : null,
       badge(s),
       el("span", { class: `state ${s.state}`, text: STATE_LABEL[s.state] || s.state })),
     s.title ? el("p", { class: "sub", text: s.title }) : null,
@@ -244,7 +259,9 @@ async function answer(e, path, body) {
 }
 
 function reqCard(r) {
-  return r.t === "perm" ? permCard(r) : askCard(r);
+  const card = r.t === "perm" ? permCard(r) : askCard(r);
+  card.setAttribute("data-req", r.req);
+  return card;
 }
 
 function syncCards(container, reqs, cache) {
@@ -254,10 +271,19 @@ function syncCards(container, reqs, cache) {
     if (!keep.has(req)) { cache.get(req).remove(); cache.delete(req); changed = true; }
   }
   for (const r of reqs) {
-    if (!cache.has(r.req)) { cache.set(r.req, reqCard(r)); changed = true; }
+    if (cache.has(r.req)) continue;
+    const card = reqCard(r);
+    // 接続後に新しく届いた要対応だけを短く強調する（スナップショットの分は強調しない）
+    if (state.snapshotAt !== null && (r.at || 0) >= state.snapshotAt) {
+      card.classList.add("flash");
+      setTimeout(() => card.classList.remove("flash"), 2000);
+    }
+    cache.set(r.req, card);
+    changed = true;
   }
-  Activity.placeInOrder(container, reqs.map((r) => cache.get(r.req)));
-  if (changed) state.guardUntil = Date.now() + 800;
+  const moved = Activity.placeInOrder(container, reqs.map((r) => cache.get(r.req)));
+  // カードが増減したり動いたりした直後は、押し間違いを避けるためタップを受け付けない
+  if (changed || moved) state.guardUntil = Date.now() + 800;
 }
 
 // 画面の表示は state.current だけから導く（遷移・SSE・1 秒ごとの描き直しのどれからでも同じ結果になる）
@@ -276,8 +302,9 @@ function render() {
     return;
   }
   syncView();
-  const reqs = [...state.reqs.values()];
+  const reqs = pending();
   syncCards($("reqs"), reqs, cards.list);
+  renderPending(reqs);
   const cardsInOrder = sortedSessions().map(sessionCard);
   $("sessions").replaceChildren(...(cardsInOrder.length ? cardsInOrder : [el("p", { class: "empty", text: "セッションはありません" })]));
   if (state.current) {
@@ -291,6 +318,48 @@ function render() {
     if (open) $("activity").querySelector("details").open = true;
     syncCards($("d-reqs"), reqs.filter((r) => r.sid === s.sid), cards.detail);
   }
+}
+
+function pendingText(r) {
+  if (r.t === "perm") return `許可待ち ${r.tool}${r.desc ? "：" + r.desc : ""}`;
+  return `質問 ${r.qs[0]?.q || ""}`;
+}
+
+function renderPending(reqs) {
+  const n = reqs.length;
+  const bar = $("pending-bar");
+  bar.hidden = n === 0;
+  if (state.current) {
+    const mine = reqs.filter((r) => r.sid === state.current).length;
+    bar.textContent = `要対応 ${n} 件（このセッション ${mine} 件・他のセッション: ${n - mine} 件）`;
+  } else {
+    bar.textContent = `要対応 ${n} 件 ▾`;
+  }
+  if (n === 0) state.pendingOpen = false;
+  $("pending-list").hidden = !state.pendingOpen;
+  if (state.pendingOpen) {
+    const now = Date.now() / 1000 + list.offset;
+    $("pending-list").replaceChildren(...reqs.map((r) => el("div", {
+      class: "pitem", "data-req": r.req, onclick: () => jumpTo(r),
+      text: `${label(r)}　${pendingText(r)}　${ago(now - (r.at || now))}前`,
+    })));
+  }
+  document.title = n ? `(${n}) CardBuddy` : "CardBuddy";
+  if (n !== state.badgeShown) {
+    state.badgeShown = n;
+    // PWA としてホーム画面に追加されていないときは使えないので、失敗は無視する
+    try {
+      const p = n ? navigator.setAppBadge?.(n) : navigator.clearAppBadge?.();
+      p?.catch?.(() => {});
+    } catch (e) { /* 対応していない */ }
+  }
+}
+
+function jumpTo(r) {
+  state.pendingOpen = false;
+  if (state.current !== r.sid) openDetail(r.sid);
+  else render();
+  cards.detail.get(r.req)?.scrollIntoView?.({ block: "start", behavior: "smooth" });
 }
 
 const POLL_MS = 4000;
@@ -307,9 +376,10 @@ async function loadSummaryLog(sid) {
   window.scrollTo(0, document.body.scrollHeight);
 }
 
-function logItem(kind, text) {
+function logItem(kind, text, via) {
+  const who = kind === "user" ? (via ? `あなた（📱 ${via === "cardbuddy" ? "デバイス / Web" : via} から）` : "あなた") : "Claude";
   return el("div", { class: `log-item ${kind === "user" ? "u" : "a"}` },
-    el("div", { class: "who", text: kind === "user" ? "あなた" : "Claude" }),
+    el("div", { class: "who", text: who }),
     el("div", { class: "x", text }));
 }
 
@@ -322,7 +392,9 @@ function foldable(cls, head, full) {
 }
 
 function txItem(it) {
-  if (it.kind === "user" || it.kind === "assistant") return logItem(it.kind, it.text);
+  if (it.kind === "user" || it.kind === "assistant") return logItem(it.kind, it.text, it.via);
+  // 人が書いていない user のエントリ（通知・コマンドなど）は、プロンプトに見えないよう灰色の 1 行に畳む
+  if (it.kind === "notice") return foldable("notice", `ⓘ ${it.label}：${it.text.split("\n")[0].slice(0, 80)}`, it.text);
   if (it.kind === "tool_use") return foldable("tool", `▸ ${it.name}  ${it.summary}`, it.text);
   const lines = it.text.split("\n");
   const head = lines.slice(0, HEAD_LINES).join("\n") + (lines.length > HEAD_LINES ? `\n…（全 ${lines.length} 行、タップで展開）` : "");
@@ -411,6 +483,7 @@ window.addEventListener("popstate", (e) => {
 
 function onEvent(ev) {
   if (ev.t === "sessions") {
+    if (state.snapshotAt === null && typeof ev.now === "number") state.snapshotAt = ev.now;
     const prev = state.sessions.find((x) => x.sid === state.current);
     state.sessions = ev.s;
     if (typeof ev.now === "number") list.offset = ev.now - Date.now() / 1000;
@@ -435,6 +508,7 @@ function connect() {
   es.onopen = () => {
     // 再接続のたびにスナップショットが届くので、それまでの要求は捨てて作り直す
     state.reqs.clear();
+    state.snapshotAt = null;
     $("conn").textContent = "接続済み";
     $("conn").classList.add("on");
   };
@@ -446,6 +520,7 @@ function connect() {
 }
 
 $("back").addEventListener("click", closeDetail);
+$("pending-bar").addEventListener("click", () => { state.pendingOpen = !state.pendingOpen; render(); });
 $("latest").addEventListener("click", () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
 $("reload").addEventListener("click", loadLatest);
 $("older").addEventListener("click", loadOlder);

@@ -57,10 +57,15 @@ const Activity = (() => {
 
   // 位置が合っているノードには触れない（入れ直すとフォーカスが外れ、iOS ではキーボードが閉じる）
   function placeInOrder(container, nodes) {
+    let moved = 0;
     nodes.forEach((node, i) => {
       const at = container.children[i] || null;
-      if (at !== node) container.insertBefore(node, at);
+      if (at !== node) {
+        container.insertBefore(node, at);
+        moved += 1;
+      }
     });
+    return moved;
   }
 
   return { derive, state, placeInOrder, SUB_RECENT };

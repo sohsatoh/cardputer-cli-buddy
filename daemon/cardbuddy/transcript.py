@@ -122,6 +122,28 @@ def _result_text(content) -> str:
     return "\n".join(parts)
 
 
+# 人が書いていない user のエントリ（通知・コマンド・シェルの入出力など）を、プロンプトと分けて畳むための見出し
+ORIGIN_LABELS = {"task-notification": "通知", "plugin": "プラグイン", "auto-continuation": "自動の続き",
+                 "peer": "他のセッション"}
+TAG_LABELS = (("<task-notification>", "通知"), ("<command-", "コマンド"), ("<bash-", "シェル"),
+              ("<local-command-", "コマンドの出力"), ("<system-reminder>", "システム"))
+
+
+def _user_item(n: int, e: dict, text: str) -> dict:
+    origin = e.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    # Cardputer や Web から送ったプロンプトは、mod が prompt.submit({asUser: true}) で入れるので origin が plugin になる
+    if kind == "plugin" and (origin.get("asUser") is True or origin.get("name") == "cardbuddy"):
+        return {"line": n, "kind": "user", "text": _cut(text), "via": str(origin.get("name", "plugin"))}
+    # origin のメタ情報を優先し、無い古い形式や人の入力でも、決まったタグで始まるものは通知として扱う
+    label = ORIGIN_LABELS.get(kind) or next((v for k, v in TAG_LABELS if text.lstrip().startswith(k)), None)
+    if label is None and kind not in (None, "human"):
+        label = "その他"
+    if label:
+        return {"line": n, "kind": "notice", "label": label, "text": _cut(text)}
+    return {"line": n, "kind": "user", "text": _cut(text)}
+
+
 def parse_line(n: int, raw: bytes) -> list[dict]:
     try:
         e = json.loads(raw)
@@ -132,14 +154,15 @@ def parse_line(n: int, raw: bytes) -> list[dict]:
     msg = e.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     if e["type"] == "user" and isinstance(content, str):
-        return [{"line": n, "kind": "user", "text": _cut(content)}]
+        return [_user_item(n, e, content)]
     out = []
     for b in content if isinstance(content, list) else []:
         if not isinstance(b, dict):
             continue
         t = b.get("type")
         if t == "text" and isinstance(b.get("text"), str):
-            out.append({"line": n, "kind": e["type"], "text": _cut(b["text"])})
+            out.append(_user_item(n, e, b["text"]) if e["type"] == "user"
+                       else {"line": n, "kind": "assistant", "text": _cut(b["text"])})
         elif t in ("tool_use", "server_tool_use"):
             out.append({"line": n, "kind": "tool_use", "name": str(b.get("name", "?")),
                         "summary": _summary(b.get("input")),

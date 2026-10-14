@@ -100,6 +100,11 @@ class SessionTable:
         s.setdefault("updated_at", 0)
         return s["n"]
 
+    def stamp(self, req: str, at: float):
+        """Web で経過時間を出し、古い順に並べるための作成時刻（UNIX 秒）を記録する。"""
+        if req in self.reqs:
+            self.reqs[req]["at"] = at
+
     def touch(self, sid: str, at: float):
         """Web の一覧の並べ替えに使う、最後に動きがあった時刻（UNIX 秒）を記録する。"""
         if sid in self.sessions:
@@ -167,7 +172,7 @@ class SessionTable:
         if r is None:
             return None
         sid = r["sid"]
-        head = {"t": r["kind"], "req": req, "sid": sid, "n": self.sessions[sid]["n"], "id": sid[:8],
+        head = {"t": r["kind"], "req": req, "sid": sid, "at": r.get("at", 0), "n": self.sessions[sid]["n"], "id": sid[:8],
                 "name": os.path.basename(self.sessions[sid]["cwd"].rstrip("/"))}
         return {**head, **r["web"]} if r["kind"] == "perm" else {**head, "qs": r["qs"]}
 

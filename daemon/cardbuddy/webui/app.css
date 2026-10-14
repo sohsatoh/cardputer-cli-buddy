@@ -94,3 +94,13 @@ textarea {
 .activity summary { font-size: 13px; color: var(--sub); margin-top: 6px; }
 .ago { font-size: 11px; color: var(--sub); margin: 2px 0 0; text-align: right; }
 .path { font: 13px/1.4 ui-monospace, Menlo, monospace; font-weight: 700; overflow-wrap: anywhere; margin: 8px 0 0; }
+.pbar { display: block; width: 100%; margin-top: 6px; padding: 6px 10px; border-radius: 8px; border: 0;
+  background: var(--ng); color: #fff; font-weight: 700; text-align: left; }
+.plist { margin-top: 6px; max-height: 50vh; overflow: auto; }
+.pitem { padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 14px; overflow-wrap: anywhere; cursor: pointer; }
+.card.session.attention { border-color: var(--ng); border-width: 2px; }
+.pcount { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--ng); color: #fff; }
+.card.req.flash { animation: flash 2s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 4px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
+.fold.notice { border-style: dotted; opacity: .7; }
+.fold.notice .head { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

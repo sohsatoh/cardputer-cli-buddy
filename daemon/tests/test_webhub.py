@@ -35,10 +35,10 @@ def test_web_views_keep_full_text():
     cmd = "echo " + "あ" * 1500
     req, msgs = t.add_perm(SID, "Bash", {"command": cmd, "description": "d" * 100}, 0)
     assert msgs[0]["full"] is False
-    assert t.web_req(req) == {"t": "perm", "req": req, "sid": SID, "n": 1, "id": SID[:8], "name": "proj",
+    assert t.web_req(req) == {"t": "perm", "req": req, "sid": SID, "at": 0, "n": 1, "id": SID[:8], "name": "proj",
                               "tool": "Bash", "desc": "d" * 100, "hint": cmd, "extra": ""}
     areq, _ = t.add_ask(SID, QS)
-    assert t.web_req(areq) == {"t": "ask", "req": areq, "sid": SID, "n": 1, "id": SID[:8], "name": "proj", "qs": QS}
+    assert t.web_req(areq) == {"t": "ask", "req": areq, "sid": SID, "at": 0, "n": 1, "id": SID[:8], "name": "proj", "qs": QS}
     assert [r["req"] for r in t.web_reqs()] == [req, areq]
     s, = t.web_sessions()
     assert s == {"sid": SID, "n": 1, "id": SID[:8], "name": "proj", "title": ("最初のプロンプト" + "x" * 100)[:79] + "…",
