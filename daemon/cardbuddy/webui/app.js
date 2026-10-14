@@ -4,8 +4,6 @@
 const $ = (id) => document.getElementById(id);
 const state = { sessions: [], reqs: new Map(), current: null, guardUntil: 0, snapshotAt: null, pendingOpen: false, badgeShown: 0 };
 const cards = { list: new Map(), detail: new Map() };
-// 制御文字・双方向制御文字・ゼロ幅文字は、見た目と実際の文字列を食い違わせられるので記号で見せる
-const HIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
 const STATE_LABEL = { running: "実行中", idle: "待機", perm: "許可待ち", ask: "質問" };
 
 function el(tag, attrs = {}, ...children) {
@@ -45,15 +43,7 @@ async function post(path, body) {
 }
 
 function visible(text) {
-  const pre = el("pre");
-  let last = 0;
-  for (const m of text.matchAll(HIDDEN)) {
-    pre.append(text.slice(last, m.index));
-    pre.append(el("span", { class: "ctl", text: `\\u{${m[0].codePointAt(0).toString(16).toUpperCase()}}` }));
-    last = m.index + m[0].length;
-  }
-  pre.append(text.slice(last));
-  return pre;
+  return el("pre", {}, ...Markdown.showHidden(text));
 }
 
 function label(s) {
@@ -380,7 +370,7 @@ function logItem(kind, text, via) {
   const who = kind === "user" ? (via ? `あなた（📱 ${via === "cardbuddy" ? "デバイス / Web" : via} から）` : "あなた") : "Claude";
   return el("div", { class: `log-item ${kind === "user" ? "u" : "a"}` },
     el("div", { class: "who", text: who }),
-    el("div", { class: "x", text }));
+    kind === "user" ? el("div", { class: "x", text }) : el("div", { class: "x md" }, ...Markdown.render(text)));
 }
 
 function foldable(cls, head, full) {

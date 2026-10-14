@@ -31,6 +31,7 @@ UI = Path(__file__).parent / "webui"
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/activity.js": ("activity.js", "text/javascript; charset=utf-8"),
+          "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
           "/app.css": ("app.css", "text/css; charset=utf-8")}
 SECURITY_HEADERS = ("Content-Security-Policy: default-src 'self'\r\n"
                     "X-Frame-Options: DENY\r\n"

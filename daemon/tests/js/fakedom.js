@@ -64,14 +64,15 @@ function boot() {
     EventSource: class { constructor() { es = this; this.readyState = 1; } close() { this.readyState = 2; } },
     fetch: async (url, opts) => { fetches.push({ url, opts }); return { ok: false, status: 404, json: async () => ({}) }; },
     setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
-    Date, JSON, Map, Set, Math, Number, String, Object, Array, encodeURIComponent, Promise,
+    Date, JSON, Map, Set, Math, Number, String, Object, Array, encodeURIComponent, Promise, URL,
   };
   ctx.addEventListener = ctx.window.addEventListener;
   vm.createContext(ctx);
   const ui = path.join(__dirname, "..", "..", "cardbuddy", "webui");
   vm.runInContext(fs.readFileSync(path.join(ui, "activity.js"), "utf8"), ctx);
+  vm.runInContext(fs.readFileSync(path.join(ui, "markdown.js"), "utf8"), ctx);
   // const 宣言はコンテキストのグローバルに出ないので、関数を明示的に取り出す
-  vm.runInContext(fs.readFileSync(path.join(ui, "app.js"), "utf8") + "\n;globalThis.__app = { openDetail, state };", ctx);
+  vm.runInContext(fs.readFileSync(path.join(ui, "app.js"), "utf8") + "\n;globalThis.__app = { openDetail, state, logItem };", ctx);
   return {
     ctx, listeners, fetches,
     $: (id) => ctx.document.getElementById(id),

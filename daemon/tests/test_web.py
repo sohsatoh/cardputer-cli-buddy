@@ -289,8 +289,12 @@ async def test_perm_and_ask_are_kept_for_web_without_subscribers(home):
 
 
 def test_ui_never_uses_inner_html():
-    js = (UI / "app.js").read_text()
-    assert "innerHTML" not in js and "insertAdjacentHTML" not in js and "eval(" not in js
+    scripts = sorted(UI.glob("*.js"))
+    assert {p.name for p in scripts} >= {"app.js", "activity.js", "markdown.js"}
+    for p in scripts:
+        js = p.read_text()
+        for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+            assert bad not in js, f"{p.name}: {bad}"
     html = (UI / "index.html").read_text()
     assert "<script>" not in html and "<style>" not in html and 'src="/app.js"' in html
 
@@ -448,6 +452,8 @@ async def test_activity_is_streamed_with_snapshot(home):
 def test_ui_activity_script_is_served_before_app():
     html = (UI / "index.html").read_text()
     assert html.index('src="/activity.js"') < html.index('src="/app.js"')
+    assert html.index('src="/markdown.js"') < html.index('src="/app.js"')
+    assert all(name in web.STATIC for name in ("/activity.js", "/markdown.js"))
 
 
 @aio

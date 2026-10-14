@@ -104,3 +104,22 @@ textarea {
 @keyframes flash { from { box-shadow: 0 0 0 4px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
 .fold.notice { border-style: dotted; opacity: .7; }
 .fold.notice .head { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md blockquote, .md .table-wrap { margin: 6px 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 4px; line-height: 1.3; color: var(--fg); font-size: 1em; }
+.md h1 { font-size: 1.3em; }
+.md h2 { font-size: 1.2em; }
+.md h3 { font-size: 1.1em; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md li > ul, .md li > ol { margin: 0; }
+.md code { font: .9em ui-monospace, Menlo, monospace; background: var(--bg); padding: 0 4px; border-radius: 4px; }
+.md pre code { font: inherit; background: none; padding: 0; }
+.md blockquote { margin-left: 0; margin-right: 0; padding-left: 10px; border-left: 3px solid var(--line); color: var(--sub); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+.md a { color: var(--accent); }
+.md .table-wrap { overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: 14px; }
+/* .x の overflow-wrap: anywhere のままだと列が 1 文字幅まで縮み、横スクロールにならない */
+.md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; overflow-wrap: break-word; }
+.md th { background: var(--bg); }
