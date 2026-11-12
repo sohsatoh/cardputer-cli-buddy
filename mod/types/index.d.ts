@@ -1,4 +1,4 @@
-export type CardbuddyLoop = number
+export type CardbuddyLoop = string
 
 declare module 'claude-code' {
   interface PluginState {

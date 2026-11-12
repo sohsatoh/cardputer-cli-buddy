@@ -265,6 +265,51 @@ for (const reason of ['clear', 'resume'] as const) {
   })
 }
 
+test('clear の後も、state の無い新しいセッションでデバイスのプロンプトを投入し続ける', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  let cleared = false
+  on('session.end', (_$, e) => ((b.ids.sid = 'sid-2'), (cleared = true), { sessionId: e.sessionId }))
+  // /clear の後のプロセスは session.start の無い新しいセッションで続き、その state に loop は無い
+  on('state.get', (_$, e, next) => (cleared ? { value: { value: undefined, version: 0 } } : next(e)))
+  const submitted: unknown[] = []
+  on('prompt.submit', (_$, e) => (submitted.push(e), { text: e.text }))
+  await start($)
+  await clock.advance(0)
+
+  await $.session.end({ reason: 'clear', sessionId: SID, resume: { id: SID } })
+  await clock.advance(0)
+  // fake の queue は sid を区別しないので 1 件目は clear 前からの poll が運ぶ。ループが続いているかは 2 件目で分かる
+  for (const text of ['clear の後', 'もう 1 件']) {
+    b.push({ type: 'prompt', text })
+    await clock.advance(0)
+  }
+  expect(submitted.map(e => (e as { text: string }).text)).toEqual(['clear の後', 'もう 1 件'])
+  expect(b.posted('/ack_prompt').map(s => s.body)).toEqual([
+    { sid: 'sid-2', queued: false },
+    { sid: 'sid-2', queued: false },
+  ])
+})
+
+test('state に別のトークンが書かれたら（hot reload）古いループは poll をやめる', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/h' })
+  const b = fakeBuddyd(on)
+  let reloaded = false
+  on('state.get', (_$, e, next) => (reloaded ? { value: { value: 'newer', version: 2 } } : next(e)))
+  await start($)
+  await clock.advance(0)
+
+  reloaded = true
+  b.push({ type: 'prompt', text: '1 件目' })
+  await clock.advance(0)
+  const polls = b.seen.filter(s => s.path.startsWith('/poll')).length
+  b.push({ type: 'prompt', text: '2 件目' })
+  await clock.advance(30_000)
+  expect(b.seen.filter(s => s.path.startsWith('/poll')).length).toBe(polls)
+})
+
 test('選択肢が 2〜4 個でない質問はデバイスへ送らず端末に任せる', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/h' })

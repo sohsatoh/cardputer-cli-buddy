@@ -111,9 +111,16 @@ const onEvent = ($: $, ev: PollEvent) => {
 }
 
 // A hot reload raises session.start again in a fresh environment while the old loop may still be polling;
-// the generation in $.state (which survives the reload) tells the old loop to stop.
-const pollLoop = async ($: $, gen: number) => {
-  while (!ended && (await $.state.get(LOOP)).value === gen) {
+// the token in $.state (which survives the reload) tells the old loop to stop. A /clear or a resume moves
+// the process to a session with no state and no session.start, so an empty value keeps this loop running.
+// Random tokens, not a counter: a reload after a /clear would start the count over and collide with this loop.
+const owns = async ($: $, token: string) => {
+  const { value } = await $.state.get(LOOP)
+  return value === undefined || value === token
+}
+
+const pollLoop = async ($: $, token: string) => {
+  while (!ended && (await owns($, token))) {
     if (Date.now() - lastBeat >= HEARTBEAT_MS) await heartbeat($)
     let events: PollEvent[]
     try {
@@ -129,11 +136,11 @@ const pollLoop = async ($: $, gen: number) => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cwd = e.cwd
-    const { value = 0 } = await $.state.get(LOOP)
-    await $.state.set(LOOP, value + 1)
+    const token = Math.random().toString(36).slice(2)
+    await $.state.set(LOOP, token)
     await heartbeat($)
     $.clock.every(HEARTBEAT_MS, () => void heartbeat($))
-    void pollLoop($, value + 1).catch(() => {})
+    void pollLoop($, token).catch(() => {})
     return next(e)
   })
 
